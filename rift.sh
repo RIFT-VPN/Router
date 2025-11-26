@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "=== INSTALLING PODKOP PANEL V22 (Silent Loader) ==="
+echo "=== INSTALLING RIFT PANEL (Silent Loader) ==="
 
 # 1. Install Dependencies
 opkg update
@@ -267,7 +267,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Podkop VPN</title>
+    <title>RIFT</title>
     <style>
         :root {
             --bg-color: #0f0f0f; --card-color: #1c1c1e; --text-color: #ffffff;
@@ -371,25 +371,45 @@ cat << 'EOF' > /www/podkop_panel/index.html
     async function updateSubs(){showLoader();try{let r=await api('update_subs',{});if(r.status==='ok')await loadData();else alert("Ошибка: "+(r.msg||"Неизвестная"))}catch(e){alert("Сбой сети")}finally{hideLoader()}}
     function toggleUrlInput(){let e=document.getElementById('url_group');e.style.display=(e.style.display==='flex')?'none':'flex'}
     async function saveUrl(){let u=document.getElementById('sub_url').value;if(!u)return;showLoader();try{await api('update_subs',{url:u});await loadData();toggleUrlInput()}catch(e){alert("Ошибка")}finally{hideLoader()}}
-    async function connect(i){if(!confirm(`Подключиться к ${globalNodes[i].name}?`))return;showLoader();try{await api('apply',{node_url:globalNodes[i].full_url});await new Promise(r=>setTimeout(r,2500));await loadData()}catch(e){alert("Ошибка")}finally{hideLoader()}}
+    
+    async function connect(i){
+        showLoader();
+        try{
+            await api('apply',{node_url:globalNodes[i].full_url});
+            await new Promise(r=>setTimeout(r,2500));
+            await loadData()
+        }catch(e){
+            alert("Ошибка")
+        }finally{
+            hideLoader()
+        }
+    }
+
     async function pingAll(){for(let i=0;i<globalNodes.length;i++){let e=document.getElementById(`ping_${i}`);e.innerText="...";api('ping',{host:globalNodes[i].host}).then(r=>{let ms=parseInt(r.time);let c=(r.status!=='ok')?'p-bad':(ms<150?'p-good':'p-avg');e.innerHTML=`<span class="${c}">${r.time}</span>`});await new Promise(r=>setTimeout(r,100))}}
+    
     async function loadNetwork(){
         try{
             let d=await api('get_network');
-            let c=d.clients||[];
-            let v=d.vpn_ips; if(!Array.isArray(v)) v=[];
-            let dom=d.domains; if(!Array.isArray(dom)) dom=[];
+            let c = Array.isArray(d.clients) ? d.clients : [];
+            let v = Array.isArray(d.vpn_ips) ? d.vpn_ips : [];
+            let dom = Array.isArray(d.domains) ? d.domains : [];
+
             let h="";
             v.forEach(ip=>{let f=c.find(x=>x.ip===ip);if(!f)h+=bvr("Static IP",ip,true)});
             c.forEach(x=>{let iv=v.includes(x.ip);h+=bvr(x.name,x.ip,iv)});
             if(h==="")h="<div style='text-align:center;color:#666'>Нет устройств</div>";
             document.getElementById("vpn_list").innerHTML=h;
+            
             let dh="";
             if(dom.length===0)dh="<small style='color:#666'>Список пуст</small>";
             else dom.forEach(dm=>{dh+=`<div class="chip">${dm} <span onclick="toggleDom('${dm}','del')">×</span></div>`});
             document.getElementById("domains_list").innerHTML=dh
-        }catch(e){}
+        }catch(e){
+            console.error(e);
+            document.getElementById("vpn_list").innerHTML="<div style='text-align:center;color:red'>Ошибка JS</div>";
+        }
     }
+    
     function bvr(n,ip,iv){let c=iv?"vpn-switch on":"vpn-switch off";let t=iv?"ВКЛЮЧЕНО":"ВЫКЛЮЧЕНО";let a=iv?"del":"add";return `<div class="vpn-row"><div><span class="dev-info">${n}</span><span class="dev-sub">${ip}</span></div><div class="${c}" onclick="toggleVpn('${ip}','${a}')">${t}</div></div>`}
     async function toggleVpn(ip,a){showLoader();try{await api('manage_vpn',{ip:ip,action:a});await new Promise(r=>setTimeout(r,2000));await loadNetwork()}catch(e){alert("Ошибка")}finally{hideLoader()}}
     function addManualIp(){let ip=document.getElementById('manual_ip').value;if(ip)toggleVpn(ip,'add');document.getElementById('manual_ip').value=""}
