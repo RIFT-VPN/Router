@@ -29,7 +29,7 @@ uci commit uhttpd
 while uci -q delete dhcp.@domain[-1]; do :; done 2>/dev/null
 uci add dhcp domain
 uci set dhcp.@domain[-1].name='rift'
-uci set dhcp.@domain[-1].ip='192.168.47.1'
+uci set dhcp.@domain[-1].ip='192.168.1.1'
 uci del_list dhcp.@dnsmasq[0].rebind_domain='rift' 2>/dev/null
 uci add_list dhcp.@dnsmasq[0].rebind_domain='rift'
 uci commit dhcp
