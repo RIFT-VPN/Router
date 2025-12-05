@@ -1,30 +1,11 @@
 #!/bin/sh
 
-# Этот скрипт был изменен, чтобы убрать проверку модели роутера
-# и подтвердить установку Podkop версии 0.2.5.
-
 # =============================================================
-#                 НАЧАЛО ИЗМЕНЕННОГО СКРИПТА
+#         ОБЛЕГЧЕННАЯ ВЕРСИЯ СКРИПТА (БЕЗ SING-BOX И OPERA PROXY)
 # =============================================================
 
-#!/bin/sh
-
-DESCRIPTION=$(ubus call system board | jsonfilter -e '@.release.description')
-VERSION=$(ubus call system board | jsonfilter -e '@.release.version')
-findKey="RouteRich"
-findVersion="24.10.2"
-
-if echo "$DESCRIPTION" | grep -qi -- "$findKey" && printf '%s\n%s\n' "$findVersion" "$VERSION" | sort -V | tail -n1 | grep -qx -- "$VERSION"; then
-	printf "\033[32;1mThis new firmware. Running new scprit...\033[0m\n"
-	wget --no-check-certificate -O /tmp/universal_config_new_podkop.sh https://raw.githubusercontent.com/routerich/RouterichAX3000_configs/refs/heads/podkop07/universal_config_new_podkop.sh && chmod +x /tmp/universal_config_new_podkop.sh && /tmp/universal_config_new_podkop.sh $1 $2
-else
-	printf "\033[32;1mThis old firmware.\nRecommendation, upgrade firmware to actual release...\nSleep 5 sec...\033[0m\n"
-	sleep 5
-	printf "\033[32;1mRunning old scprit...\033[0m\n"
-	wget --no-check-certificate -O /tmp/universal_config.sh https://raw.githubusercontent.com/routerich/RouterichAX3000_configs/refs/heads/podkop07/universal_config.sh && chmod +x /tmp/universal_config.sh && /tmp/universal_config.sh $1 $2
-fi
-
-#!/bin/sh
+# Функции и первоначальные шаги остаются без изменений...
+# ... (здесь идут функции install_awg_packages, manage_package, requestConfWARP и т.д.) ...
 
 install_awg_packages() {
     # Получение pkgarch с наибольшим приоритетом
@@ -119,10 +100,7 @@ manage_package() {
     local autostart="$2"
     local process="$3"
 
-    # Проверка, установлен ли пакет
     if opkg list-installed | grep -q "^$name"; then
-        
-        # Проверка, включен ли автозапуск
         if /etc/init.d/$name enabled; then
             if [ "$autostart" = "disable" ]; then
                 /etc/init.d/$name disable
@@ -132,8 +110,6 @@ manage_package() {
                 /etc/init.d/$name enable
             fi
         fi
-
-        # Проверка, запущен ли процесс
         if pidof $name > /dev/null; then
             if [ "$process" = "stop" ]; then
                 /etc/init.d/$name stop
@@ -150,16 +126,15 @@ checkPackageAndInstall()
 {
     local name="$1"
     local isRequried="$2"
-    #проверяем установлени ли библиотека $name
     if opkg list-installed | grep -q $name; then
         echo "$name already installed..."
     else
-        echo "$name not installed. Installed $name..."
+        echo "$name not installed. Installing $name..."
         opkg install $name
 		res=$?
 		if [ "$isRequried" = "1" ]; then
 			if [ $res -eq 0 ]; then
-				echo "$name insalled successfully"
+				echo "$name installed successfully"
 			else
 				echo "Error installing $name. Please, install $name manually and run the script again"
 				exit 1
@@ -167,6 +142,7 @@ checkPackageAndInstall()
 		fi
     fi
 }
+# ... (все функции requestConfWARP, confWarpBuilder, check_request, и т.д. остаются здесь) ...
 
 requestConfWARP1()
 {
@@ -616,59 +592,20 @@ install_awg_packages
 checkPackageAndInstall "jq" "1"
 checkPackageAndInstall "curl" "1"
 checkPackageAndInstall "unzip" "1"
-#checkPackageAndInstall "sing-box" "1"
-checkPackageAndInstall "opera-proxy" "1"
 checkPackageAndInstall "youtubeUnblock" "1"
 
-###########
+# --- УДАЛЕНА УСТАНОВКА sing-box и opera-proxy ---
+
 manage_package "podkop" "enable" "stop"
-
-PACKAGE="sing-box"
-REQUIRED_VERSION="1.11.15"
-
-INSTALLED_VERSION=$(opkg list-installed | grep "^$PACKAGE" | cut -d ' ' -f 3)
-if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "$REQUIRED_VERSION" ]; then
-    echo "Version package $PACKAGE not equal $REQUIRED_VERSION. Removed packages..."
-	opkg remove --force-removal-of-dependent-packages $PACKAGE
-fi
-
-INSTALLED_VERSION=$(opkg list-installed | grep "^$PACKAGE")
-if [ -z "$INSTALLED_VERSION" ]; then
-	PACK_NAME="sing-box"
-	AWG_DIR="/tmp/$PACK_NAME"
-	SINGBOX_FILENAME="sing-box_1.11.15_openwrt_aarch64_cortex-a53.ipk"
-	BASE_URL="https://github.com/SagerNet/sing-box/releases/download/v1.11.15/"
-	DOWNLOAD_URL="${BASE_URL}${SINGBOX_FILENAME}"
-	mkdir -p "$AWG_DIR"
-	#echo $DOWNLOAD_URL
-
-	wget -O "$AWG_DIR/$SINGBOX_FILENAME" "$DOWNLOAD_URL"
-	if [ $? -eq 0 ]; then
-		echo "$PACK_NAME file downloaded successfully"
-	else
-		echo "Error downloading $PACK_NAME. Please, install $PACK_NAME manually and run the script again"
-		exit 1
-	fi
-			
-	opkg install "$AWG_DIR/$SINGBOX_FILENAME"
-	if [ $? -eq 0 ]; then
-		echo "$PACK_NAME file installing successfully"
-	else
-		echo "Error installing $PACK_NAME. Please, install $PACK_NAME manually and run the script again"
-		exit 1
-	fi
-fi
-###########
 
 opkg upgrade youtubeUnblock
 opkg upgrade luci-app-youtubeUnblock
 manage_package "youtubeUnblock" "enable" "start"
 
-#проверяем установлени ли пакет dnsmasq-full
 if opkg list-installed | grep -q dnsmasq-full; then
 	echo "dnsmasq-full already installed..."
 else
-	echo "Installed dnsmasq-full..."
+	echo "Installing dnsmasq-full..."
 	cd /tmp/ && opkg download dnsmasq-full
 	opkg remove dnsmasq && opkg install dnsmasq-full --cache /tmp/
 
@@ -681,94 +618,45 @@ uci commit dhcp
 
 DIR="/etc/config"
 DIR_BACKUP="/root/backup3"
-config_files="network
-firewall
-https-dns-proxy
-youtubeUnblock
-dhcp"
+config_files="network firewall https-dns-proxy youtubeUnblock dhcp"
 URL="https://raw.githubusercontent.com/routerich/RouterichAX3000_configs/refs/heads/podkop07"
 
 checkPackageAndInstall "https-dns-proxy" "0"
 
-if [ ! -d "$DIR_BACKUP" ]
-then
+if [ ! -d "$DIR_BACKUP" ]; then
     echo "Backup files..."
     mkdir -p $DIR_BACKUP
-    for file in $config_files
-    do
+    for file in $config_files; do
         cp -f "$DIR/$file" "$DIR_BACKUP/$file"  
     done
 	echo "Replace configs..."
 
-	for file in $config_files
-	do
-		if [ "$file" == "https-dns-proxy" ] 
-		then 
+	for file in $config_files; do
+		if [ "$file" = "https-dns-proxy" ]; then 
 		  wget -O "$DIR/$file" "$URL/config_files/$file" 
 		fi
 	done
 fi
 
 echo "Configure dhcp..."
-
 uci set dhcp.cfg01411c.strictorder='1'
 uci set dhcp.cfg01411c.filter_aaaa='1'
 uci commit dhcp
 
-cat <<EOF > /etc/sing-box/config.json
-{
-	"log": {
-	"disabled": true,
-	"level": "error"
-},
-"inbounds": [
-	{
-	"type": "tproxy",
-	"listen": "::",
-	"listen_port": 1100,
-	"sniff": false
-	}
-],
-"outbounds": [
-	{
-	"type": "http",
-	"server": "127.0.0.1",
-	"server_port": 18080
-	}
-],
-"route": {
-	"auto_detect_interface": true
-}
-}
-EOF
-
-echo "Setting sing-box..."
-uci set sing-box.main.enabled='1'
-uci set sing-box.main.user='root'
-uci add_list sing-box.main.ifaces='wan'
-uci add_list sing-box.main.ifaces='wan2'
-uci add_list sing-box.main.ifaces='wan6'
-uci add_list sing-box.main.ifaces='wwan'
-uci add_list sing-box.main.ifaces='wwan0'
-uci add_list sing-box.main.ifaces='modem'
-uci add_list sing-box.main.ifaces='l2tp'
-uci add_list sing-box.main.ifaces='pptp'
-uci commit sing-box
+# --- УДАЛЕНА КОНФИГУРАЦИЯ sing-box ---
 
 nameRule="option name 'Block_UDP_443'"
 str=$(grep -i "$nameRule" /etc/config/firewall)
-if [ -z "$str" ] 
-then
+if [ -z "$str" ]; then
   echo "Add block QUIC..."
-
-  uci add firewall rule # =cfg2492bd
+  uci add firewall rule
   uci set firewall.@rule[-1].name='Block_UDP_80'
   uci add_list firewall.@rule[-1].proto='udp'
   uci set firewall.@rule[-1].src='lan'
   uci set firewall.@rule[-1].dest='wan'
   uci set firewall.@rule[-1].dest_port='80'
   uci set firewall.@rule[-1].target='REJECT'
-  uci add firewall rule # =cfg2592bd
+  uci add firewall rule
   uci set firewall.@rule[-1].name='Block_UDP_443'
   uci add_list firewall.@rule[-1].proto='udp'
   uci set firewall.@rule[-1].src='lan'
@@ -779,60 +667,39 @@ then
 fi
 
 printf "\033[32;1mCheck work youtubeUnblock..\033[0m\n"
-#install_youtubeunblock_packages
-opkg upgrade youtubeUnblock
-opkg upgrade luci-app-youtubeUnblock
-manage_package "youtubeUnblock" "enable" "start"
 wget -O "/etc/config/youtubeUnblock" "$URL/config_files/youtubeUnblockSecond"
-manage_package "podkop" "enable" "stop"
 service youtubeUnblock restart
 
 isWorkYoutubeUnBlock=0
-
 curl -f -o /dev/null -k --connect-to ::google.com -L -H "Host: mirror.gcr.io" --max-time 360 https://test.googlevideo.com/v2/cimg/android/blobs/sha256:6fd8bdac3da660bde7bd0b6f2b6a46e1b686afb74b9a4614def32532b73f5eaa
 
-# Проверяем код выхода
 if [ $? -eq 0 ]; then
-	printf "\033[32;1myoutubeUnblock well work...\033[0m\n"
+	printf "\033[32;1myoutubeUnblock works well...\033[0m\n"
 	cronTask="0 4 * * * service youtubeUnblock restart"
 	str=$(grep -i "0 4 \* \* \* service youtubeUnblock restart" /etc/crontabs/root)
-	if [ -z "$str" ] 
-	then
+	if [ -z "$str" ]; then
 		echo "Add cron task auto reboot service youtubeUnblock..."
 		echo "$cronTask" >> /etc/crontabs/root
 	fi
 	isWorkYoutubeUnBlock=1
 else
 	manage_package "youtubeUnblock" "disable" "stop"
-	printf "\033[32;1myoutubeUnblock not work...\033[0m\n"
+	printf "\033[31;1myoutubeUnblock does not work...\033[0m\n"
 	isWorkYoutubeUnBlock=0
 	str=$(grep -i "0 4 \* \* \* service youtubeUnblock restart" /etc/crontabs/root)
-	if [ ! -z "$str" ]
-	then
+	if [ ! -z "$str" ]; then
 		grep -v "0 4 \* \* \* service youtubeUnblock restart" /etc/crontabs/root > /etc/crontabs/temp
 		cp -f "/etc/crontabs/temp" "/etc/crontabs/root"
 		rm -f "/etc/crontabs/temp"
 	fi
 fi
 
-isWorkOperaProxy=0
-printf "\033[32;1mCheck opera proxy...\033[0m\n"
-service sing-box restart
-curl --proxy http://127.0.0.1:18080 ipinfo.io/ip
-if [ $? -eq 0 ]; then
-	printf "\033[32;1mOpera proxy well work...\033[0m\n"
-	isWorkOperaProxy=1
-else
-	printf "\033[32;1mOpera proxy not work...\033[0m\n"
-	isWorkOperaProxy=0
-fi
+# --- УДАЛЕНА ПРОВЕРКА OPERA PROXY ---
 
-#printf "\033[32;1mAutomatic generate config AmneziaWG WARP (n) or manual input parameters for AmneziaWG (y)...\033[0m\n"
 countRepeatAWGGen=2
-#echo "Input manual parameters AmneziaWG? (y/n): "
-#read is_manual_input_parameters
 currIter=0
 isExit=0
+# ... (здесь идет весь блок while для генерации и проверки конфига WARP, он остается без изменений) ...
 while [ $currIter -lt $countRepeatAWGGen ] && [ "$isExit" = "0" ]
 do
 	currIter=$(( $currIter + 1 ))
@@ -953,21 +820,17 @@ do
 		
 		if [ "$warp_config" = "Error" ] 
 		then
-			printf "\033[32;1mGenerate config AWG WARP failed...Try again later...\033[0m\n"
+			printf "\033[31;1mGenerate config AWG WARP failed...Try again later...\033[0m\n"
 			isExit=2
-			#exit 1
 		else
 			while IFS=' = ' read -r line; do
 			if echo "$line" | grep -q "="; then
-				# Разделяем строку по первому вхождению "="
-				key=$(echo "$line" | cut -d'=' -f1 | xargs)  # Убираем пробелы
-				value=$(echo "$line" | cut -d'=' -f2- | xargs)  # Убираем пробелы
-				#echo "key = $key, value = $value"
+				key=$(echo "$line" | cut -d'=' -f1 | xargs)
+				value=$(echo "$line" | cut -d'=' -f2- | xargs)
 				eval "$key=\"$value\""
 			fi
 			done < <(echo "$warp_config")
 
-			#вытаскиваем нужные нам данные из распарсинного ответа
 			Address=$(echo "$Address" | cut -d',' -f1)
 			DNS=$(echo "$DNS" | cut -d',' -f1)
 			AllowedIPs=$(echo "$AllowedIPs" | cut -d',' -f1)
@@ -976,13 +839,9 @@ do
 		fi
 	fi
 	
-	if [ "$isExit" = "2" ] 
-	then
-		isExit=0
-	else
+	if [ "$isExit" != "2" ]; then
 		printf "\033[32;1mCreate and configure tunnel AmneziaWG WARP...\033[0m\n"
 
-		#задаём имя интерфейса
 		INTERFACE_NAME="awg10"
 		CONFIG_NAME="amneziawg_awg10"
 		PROTO="amneziawg"
@@ -1042,31 +901,19 @@ do
 			uci commit firewall
 		fi
 
-		# Получаем список всех зон
 		ZONES=$(uci show firewall | grep "zone$" | cut -d'=' -f1)
-		#echo $ZONES
-		# Циклически проходим по всем зонам
 		for zone in $ZONES; do
-		# Получаем имя зоны
-		CURR_ZONE_NAME=$(uci get $zone.name)
-		#echo $CURR_ZONE_NAME
-		# Проверяем, является ли это зона с именем "$ZONE_NAME"
-		if [ "$CURR_ZONE_NAME" = "$ZONE_NAME" ]; then
-			# Проверяем, существует ли интерфейс в зоне
-			if ! uci get $zone.network | grep -q "$INTERFACE_NAME"; then
-			# Добавляем интерфейс в зону
-			uci add_list $zone.network="$INTERFACE_NAME"
-			uci commit firewall
-			#echo "Интерфейс '$INTERFACE_NAME' добавлен в зону '$ZONE_NAME'"
-			fi
-		fi
+            CURR_ZONE_NAME=$(uci get $zone.name)
+            if [ "$CURR_ZONE_NAME" = "$ZONE_NAME" ]; then
+                if ! uci get $zone.network | grep -q "$INTERFACE_NAME"; then
+                    uci add_list $zone.network="$INTERFACE_NAME"
+                    uci commit firewall
+                fi
+            fi
 		done
-		if [ "$currIter" = "1" ]
-		then
+		if [ "$currIter" = "1" ]; then
 			service firewall restart
 		fi
-		#service firewall restart
-		#service network restart
 
 		if [ "$is_manual_input_parameters" = "n" ]; then
 			I=0
@@ -1080,89 +927,63 @@ do
 					uci set network.@${CONFIG_NAME}[-1].endpoint_host=$EndpointIP
 					uci set network.@${CONFIG_NAME}[-1].endpoint_port=$EndpointPort
 					uci commit network
-					# Отключаем интерфейс
 					ifdown $INTERFACE_NAME
-					# Включаем интерфейс
 					ifup $INTERFACE_NAME
-					printf "\033[33;1mIter #$I: Check Endpoint WARP $element:$element2. Wait up AWG WARP 10 second...\033[0m\n"
+					printf "\033[33;1mIter #$I: Check Endpoint WARP $element:$element2. Wait 10 seconds...\033[0m\n"
 					sleep 10
 					
-					pingAddress="8.8.8.8"
-					if ping -c 1 -I $INTERFACE_NAME $pingAddress >/dev/null 2>&1
-					then
-						printf "\033[32;1m	Endpoint WARP $element:$element2 work...\033[0m\n"
+					if ping -c 1 -I $INTERFACE_NAME 8.8.8.8 >/dev/null 2>&1; then
+						printf "\033[32;1m	Endpoint WARP $element:$element2 works...\033[0m\n"
 						isExit=1
 						break
 					else
-						printf "\033[31;1m	Endpoint WARP $element:$element2 not work...\033[0m\n"
+						printf "\033[31;1m	Endpoint WARP $element:$element2 does not work...\033[0m\n"
 						isExit=0
 					fi
 				done
-				if [ "$isExit" = "1" ]
-				then
+				if [ "$isExit" = "1" ]; then
 					break
 				fi
 			done
 		else
-			# Отключаем интерфейс
 			ifdown $INTERFACE_NAME
-			# Включаем интерфейс
 			ifup $INTERFACE_NAME
 			printf "\033[32;1mWait up AWG WARP 10 second...\033[0m\n"
 			sleep 10
-			
-			pingAddress="8.8.8.8"
-			if ping -c 1 -I $INTERFACE_NAME $pingAddress >/dev/null 2>&1
-			then
+			if ping -c 1 -I $INTERFACE_NAME 8.8.8.8 >/dev/null 2>&1; then
 				isExit=1
 			else
 				isExit=0
 			fi
 		fi
+	else
+	    isExit=0
 	fi
 done
 
 varByPass=0
 isWorkWARP=0
 
-if [ "$isExit" = "1" ]
-then
-	printf "\033[32;1mAWG WARP well work...\033[0m\n"
+if [ "$isExit" = "1" ]; then
+	printf "\033[32;1mAWG WARP works well...\033[0m\n"
 	isWorkWARP=1
 else
-	printf "\033[32;1mAWG WARP not work.....Try opera proxy...\033[0m\n"
+	printf "\033[31;1mAWG WARP does not work...\033[0m\n"
 	isWorkWARP=0
 fi
 
-echo "isWorkYoutubeUnBlock = $isWorkYoutubeUnBlock, isWorkOperaProxy = $isWorkOperaProxy, isWorkWARP = $isWorkWARP"
-
-if [ "$isWorkYoutubeUnBlock" = "1" ] && [ "$isWorkOperaProxy" = "1" ] && [ "$isWorkWARP" = "1" ] 
-then
-	varByPass=1
-elif [ "$isWorkYoutubeUnBlock" = "0" ] && [ "$isWorkOperaProxy" = "1" ] && [ "$isWorkWARP" = "1" ] 
-then
-	varByPass=2
-elif [ "$isWorkYoutubeUnBlock" = "1" ] && [ "$isWorkOperaProxy" = "1" ] && [ "$isWorkWARP" = "0" ] 
-then
-	varByPass=3
-elif [ "$isWorkYoutubeUnBlock" = "0" ] && [ "$isWorkOperaProxy" = "1" ] && [ "$isWorkWARP" = "0" ] 
-then
-	varByPass=4
-elif [ "$isWorkYoutubeUnBlock" = "1" ] && [ "$isWorkOperaProxy" = "0" ] && [ "$isWorkWARP" = "0" ] 
-then
-	varByPass=5
-elif [ "$isWorkYoutubeUnBlock" = "0" ] && [ "$isWorkOperaProxy" = "0" ] && [ "$isWorkWARP" = "1" ] 
-then
-	varByPass=6
-elif [ "$isWorkYoutubeUnBlock" = "1" ] && [ "$isWorkOperaProxy" = "0" ] && [ "$isWorkWARP" = "1" ] 
-then
-	varByPass=7
-elif [ "$isWorkYoutubeUnBlock" = "0" ] && [ "$isWorkOperaProxy" = "0" ] && [ "$isWorkWARP" = "0" ] 
-then
-	varByPass=8
+# --- ИЗМЕНЕНА ЛОГИКА ВЫБОРА СЦЕНАРИЯ ---
+if [ "$isWorkYoutubeUnBlock" = "1" ] && [ "$isWorkWARP" = "1" ]; then
+    varByPass=7 # Работает и WARP, и YoutubeUnblock -> лучший сценарий
+elif [ "$isWorkYoutubeUnBlock" = "0" ] && [ "$isWorkWARP" = "1" ]; then
+    varByPass=6 # Работает только WARP
+elif [ "$isWorkYoutubeUnBlock" = "1" ] && [ "$isWorkWARP" = "0" ]; then
+    varByPass=5 # Работает только YoutubeUnblock
+else
+    varByPass=8 # Не работает ничего
 fi
 
-printf  "\033[32;1mRestart service dnsmasq, odhcpd...\033[0m\n"
+printf  "\033[32;1mRestarting dnsmasq, odhcpd...\033[0m\n"
 service dnsmasq restart
 service odhcpd restart
 
@@ -1172,76 +993,40 @@ URL="https://raw.githubusercontent.com/routerich/RouterichAX3000_configs/refs/he
 
 messageComplete=""
 
+# --- УПРОЩЕННЫЙ БЛОК ВЫБОРА КОНФИГУРАЦИИ ---
 case $varByPass in
-1)
-	nameFileReplacePodkop="podkopNoYoutube"
-	printf  "\033[32;1mStop and disabled service 'ruantiblock'...\033[0m\n"
-	manage_package "ruantiblock" "disable" "stop"
-	wget -O "/etc/config/youtubeUnblock" "$URL/config_files/youtubeUnblockSecond"
-	service youtubeUnblock restart
-	deleteByPassGeoBlockComssDNS
-	messageComplete="ByPass block for Method 1: AWG WARP + youtubeunblock + Opera Proxy...Configured completed..."
-	;;
-2)
-	nameFileReplacePodkop="podkop"
-	printf  "\033[32;1mStop and disabled service 'youtubeUnblock' and 'ruantiblock'...\033[0m\n"
-	manage_package "youtubeUnblock" "disable" "stop"
-	manage_package "ruantiblock" "disable" "stop"
-	deleteByPassGeoBlockComssDNS
-	messageComplete="ByPass block for Method 2: AWG WARP + Opera Proxy...Configured completed..."
-	;;
-3)
-	nameFileReplacePodkop="podkopSecond"
-	printf  "\033[32;1mStop and disabled service 'ruantiblock'...\033[0m\n"
-	manage_package "ruantiblock" "disable" "stop"
-	wget -O "/etc/config/youtubeUnblock" "$URL/config_files/youtubeUnblockSecondDiscord"
-	service youtubeUnblock restart
-	deleteByPassGeoBlockComssDNS
-	messageComplete="ByPass block for Method 3: youtubeUnblock + Opera Proxy...Configured completed..."
-	;;
-4)
-	nameFileReplacePodkop="podkopSecondYoutube"
-	printf  "\033[32;1mStop and disabled service 'youtubeUnblock' and 'ruantiblock'...\033[0m\n"
-	manage_package "youtubeUnblock" "disable" "stop"
-	manage_package "ruantiblock" "disable" "stop"
-	deleteByPassGeoBlockComssDNS
-	messageComplete="ByPass block for Method 4: Only Opera Proxy...Configured completed..."
-	;;
 5)
-	nameFileReplacePodkop="podkopSecondYoutube"
-	printf  "\033[32;1mStop and disabled service 'ruantiblock' and 'podkop'...\033[0m\n"
+	nameFileReplacePodkop="podkopSecondYoutube" # Не используется, т.к. скрипт выходит
+	printf  "\033[32;1mDisabling 'ruantiblock' and 'podkop'...\033[0m\n"
 	manage_package "ruantiblock" "disable" "stop"
 	manage_package "podkop" "disable" "stop"
 	wget -O "/etc/config/youtubeUnblock" "$URL/config_files/youtubeUnblock"
 	service youtubeUnblock restart
 	byPassGeoBlockComssDNS
-	printf "\033[32;1mByPass block for Method 5: youtubeUnblock + ComssDNS for GeoBlock...Configured completed...\033[0m\n"
-	exit 1
+	printf "\033[32;1mBypass Method: youtubeUnblock + ComssDNS for GeoBlock. Configuration complete.\033[0m\n"
+	exit 0
 	;;
 6)
 	nameFileReplacePodkop="podkopWARP"
-	printf  "\033[32;1mStop and disabled service 'youtubeUnblock' and 'ruantiblock'...\033[0m\n"
+	printf  "\033[32;1mDisabling 'youtubeUnblock' and 'ruantiblock'...\033[0m\n"
 	manage_package "youtubeUnblock" "disable" "stop"
 	manage_package "ruantiblock" "disable" "stop"
 	byPassGeoBlockComssDNS
-	messageComplete="ByPass block for Method 6: AWG WARP + ComssDNS for GeoBlock...Configured completed..."
+	messageComplete="Bypass Method: AWG WARP + ComssDNS for GeoBlock. Configuration complete."
 	;;
 7)
 	nameFileReplacePodkop="podkopWARPNoYoutube"
-	printf  "\033[32;1mStop and disabled service 'ruantiblock'...\033[0m\n"
+	printf  "\033[32;1mDisabling 'ruantiblock'...\033[0m\n"
 	manage_package "ruantiblock" "disable" "stop"
 	wget -O "/etc/config/youtubeUnblock" "$URL/config_files/youtubeUnblockSecond"
 	service youtubeUnblock restart
 	byPassGeoBlockComssDNS
-	messageComplete="ByPass block for Method 7: AWG WARP + youtubeUnblock + ComssDNS for GeoBlock...Configured completed..."
-	;;
-8)
-	printf "\033[32;1mTry custom settings router to bypass the locks... Recomendation buy 'VPS' and up 'vless'\033[0m\n"
-	exit 1
+	messageComplete="Bypass Method: AWG WARP + youtubeUnblock + ComssDNS for GeoBlock. Configuration complete."
 	;;
 *)
-    echo "Unknown error. Please send message in group Telegram t.me/routerich"
+	printf "\033[31;1mNo working bypass method found. Recommendation: buy a 'VPS' and set up 'vless'.\033[0m\n"
 	exit 1
+	;;
 esac
 
 PACKAGE="podkop"
@@ -1249,75 +1034,49 @@ REQUIRED_VERSION="0.2.5-1"
 
 INSTALLED_VERSION=$(opkg list-installed | grep "^$PACKAGE" | cut -d ' ' -f 3)
 if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "$REQUIRED_VERSION" ]; then
-    echo "Version package $PACKAGE not equal $REQUIRED_VERSION. Removed packages..."
+    echo "Incorrect version of $PACKAGE found. Removing..."
     opkg remove --force-removal-of-dependent-packages $PACKAGE
 fi
 
 if [ -f "/etc/init.d/podkop" ]; then
-	#printf "Podkop installed. Reconfigured on AWG WARP and Opera Proxy? (y/n): \n"
-	#is_reconfig_podkop="y"
-	#read is_reconfig_podkop
 	if [ "$is_reconfig_podkop" = "y" ] || [ "$is_reconfig_podkop" = "Y" ]; then
 		cp -f "$path_podkop_config" "$path_podkop_config_backup"
 		wget -O "$path_podkop_config" "$URL/config_files/$nameFileReplacePodkop" 
-		echo "Backup of your config in path '$path_podkop_config_backup'"
-		echo "Podkop reconfigured..."
+		echo "Backup of your config is in '$path_podkop_config_backup'"
+		echo "Podkop reconfigured."
 	fi
 else
-	#printf "\033[32;1mInstall and configure PODKOP (a tool for point routing of traffic)?? (y/n): \033[0m\n"
 	is_install_podkop="y"
-	#read is_install_podkop
-
 	if [ "$is_install_podkop" = "y" ] || [ "$is_install_podkop" = "Y" ]; then
 		DOWNLOAD_DIR="/tmp/podkop"
 		mkdir -p "$DOWNLOAD_DIR"
-		podkop_files="podkop_0.2.5-1_all.ipk
-			luci-app-podkop_0.2.5_all.ipk
-			luci-i18n-podkop-ru_0.2.5.ipk"
-		for file in $podkop_files
-		do
-			echo "Download $file..."
+		podkop_files="podkop_0.2.5-1_all.ipk luci-app-podkop_0.2.5_all.ipk luci-i18n-podkop-ru_0.2.5.ipk"
+		for file in $podkop_files; do
+			echo "Downloading $file..."
 			wget -q -O "$DOWNLOAD_DIR/$file" "$URL/podkop_packets/$file"
 		done
 		opkg install $DOWNLOAD_DIR/podkop*.ipk
 		opkg install $DOWNLOAD_DIR/luci-app-podkop*.ipk
 		opkg install $DOWNLOAD_DIR/luci-i18n-podkop-ru*.ipk
-		rm -f $DOWNLOAD_DIR/podkop*.ipk $DOWNLOAD_DIR/luci-app-podkop*.ipk $DOWNLOAD_DIR/luci-i18n-podkop-ru*.ipk
+		rm -rf "$DOWNLOAD_DIR"
 		wget -O "$path_podkop_config" "$URL/config_files/$nameFileReplacePodkop" 
-		echo "Podkop installed.."
+		echo "Podkop installed."
 	fi
 fi
 
-printf  "\033[32;1mStart and enable service 'https-dns-proxy'...\033[0m\n"
+printf  "\033[32;1mStarting and enabling 'https-dns-proxy'...\033[0m\n"
 manage_package "https-dns-proxy" "enable" "start"
 
 str=$(grep -i "0 4 \* \* \* wget -O - $URL/configure_zaprets.sh | sh" /etc/crontabs/root)
-if [ ! -z "$str" ]
-then
+if [ ! -z "$str" ]; then
 	grep -v "0 4 \* \* \* wget -O - $URL/configure_zaprets.sh | sh" /etc/crontabs/root > /etc/crontabs/temp
 	cp -f "/etc/crontabs/temp" "/etc/crontabs/root"
 	rm -f "/etc/crontabs/temp"
 fi
 
-#printf  "\033[32;1mRestart firewall and network...\033[0m\n"
-#service firewall restart
-#service network restart
-
-# Отключаем интерфейс
-#ifdown $INTERFACE_NAME
-# Ждем несколько секунд (по желанию)
-#sleep 2
-# Включаем интерфейс
-#ifup $INTERFACE_NAME
-
-printf  "\033[32;1mService Podkop and Sing-Box restart...\033[0m\n"
-service sing-box enable
-service sing-box restart
+printf  "\033[32;1mRestarting Podkop service...\033[0m\n"
+# --- УДАЛЕНЫ КОМАНДЫ ДЛЯ SING-BOX ---
 service podkop enable
 service podkop restart
 
 printf "\033[32;1m$messageComplete\033[0m\n"
-
-# =============================================================
-#                  КОНЕЦ ИЗМЕНЕННОГО СКРИПТА
-# =============================================================
