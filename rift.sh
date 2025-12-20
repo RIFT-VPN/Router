@@ -1,8 +1,8 @@
 #!/bin/sh
 
-# === RIFT PANEL INSTALLER & UPDATER (V22 - Glassmorphism UI) ===
+# === RIFT PANEL INSTALLER & UPDATER (V23 - Final Fixes) ===
 SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
-PANEL_VERSION="2.0" # Обновили версию из-за редизайна
+PANEL_VERSION="2.3" # Обновляем версию из-за фиксов
 
 echo "=== УСТАНОВКА RIFT PANEL v${PANEL_VERSION} ==="
 
@@ -69,7 +69,7 @@ if method=="get_sub_url" then local u=uci_get("podkop_subs","config","url") prin
 print('{"error":"unknown method"}')
 EOF
 
-# --- FRONTEND (HTML with new design) ---
+# --- FRONTEND (HTML with new design and fixes) ---
 echo "[6/7] Запись Frontend интерфейса..."
 cat << 'EOF' > /www/podkop_panel/index.html
 <!DOCTYPE html>
@@ -110,22 +110,25 @@ cat << 'EOF' > /www/podkop_panel/index.html
     <div class="card" style="text-align:center;font-size:14px;color:var(--text-secondary)" id="footer"></div>
 </div>
 <script>
-let globalNodes=[],activeUrl="",vpnIps=[],domains=[];function showLoader(){document.getElementById('preloader').style.display='flex'}
-function hideLoader(){document.getElementById('preloader').style.display='none'}
-async function api(m,p={}){p.method=m;let qs=Object.keys(p).map(k=>k+'='+encodeURIComponent(p[k])).join('&');let r=await fetch('/cgi-bin/rpc?'+qs);return await r.json()}
-window.onload=async function(){api('get_sub_url').then(r=>{if(r.url)document.getElementById('sub_url').value=r.url});api('get_panel_info').then(r=>{if(r.version)document.getElementById('footer').innerHTML=`Версия: ${r.version} <button class="btn-action" style="margin-left:10px;padding:6px 12px;font-size:12px" onclick="checkForUpdates()">Обновить</button>`});loadData();loadNetwork()};async function loadData(){try{let d=await api('get_nodes');globalNodes=d.nodes||[];activeUrl=d.active_url||"";let et=d.expire?"Истекает: "+d.expire:"Нет данных о подписке";document.getElementById('sub_meta').innerText=et;let an="Нет подключения";if(activeUrl){let n=globalNodes.find(x=>x.full_url.trim()===activeUrl.trim());if(n)an=n.name;else{let m=activeUrl.match(/#(.*)$/);if(m)an=decodeURIComponent(m[1])}}document.getElementById('active_name').innerText=an;renderNodes()}catch(e){}}
-function renderNodes(){let div=document.getElementById("nodes_list");if(globalNodes.length===0){div.innerHTML='<div style="padding:16px 0;text-align:center">Список пуст</div>';return}let h="";globalNodes.forEach((n,i)=>{let ia=n.full_url.trim()===activeUrl.trim();let btn=ia?'<span class="active-badge gradient-bg">Активен</span>':`<button class="btn-action" onclick="connect(${i})">Подключить</button>`;h+=`<div class="list-row"><div><span class="item-name">${n.name}</span></div><div><span class="item-ping" id="ping_${i}">-</span> ${btn}</div></div>`});div.innerHTML=h}
-async function updateSubs(){showLoader();try{let r=await api('update_subs',{});if(r.status==='ok')await loadData();else alert("Ошибка: "+(r.msg||"Неизвестная"))}catch(e){alert("Сбой сети")}finally{hideLoader()}}
-async function saveUrl(){let u=document.getElementById('sub_url').value;if(!u)return;showLoader();try{await api('update_subs',{url:u});await loadData()}catch(e){alert("Ошибка")}finally{hideLoader()}}
-async function connect(i){if(!confirm(`Подключиться к ${globalNodes[i].name}?`))return;showLoader();try{await api('apply',{node_url:globalNodes[i].full_url});await new Promise(r=>setTimeout(r,2500));await loadData()}catch(e){alert("Ошибка")}finally{hideLoader()}}
-async function pingAll(){for(let i=0;i<globalNodes.length;i++){let e=document.getElementById(`ping_${i}`);e.innerText="...";api('ping',{host:globalNodes[i].host}).then(r=>{e.innerText=r.time||"Error"})}}
-async function loadNetwork(){try{let d=await api('get_network');let c=d.clients||[];vpnIps=d.vpn_ips;if(!Array.isArray(vpnIps))vpnIps=[];domains=d.domains;if(!Array.isArray(domains))domains=[];let vh="";vpnIps.forEach(ip=>{let f=c.find(x=>x.ip===ip);if(!f)vh+=bvr("Static IP",ip,!0)});c.forEach(x=>{let iv=vpnIps.includes(x.ip);vh+=bvr(x.name,x.ip,iv)});if(vh==="")vh="<div class='list-row' style='justify-content:center'>Нет устройств</div>";document.getElementById("vpn_list").innerHTML=vh;let domh="";if(domains.length>0)domains.forEach(dom=>{domh+=`<div class="list-row"><div><span class="item-name">${dom}</span></div><button class="btn-action" onclick="manageDomain('${dom}','del')">Удалить</button></div>`});else domh="<div class='list-row' style='justify-content:center'>Список пуст</div>";document.getElementById('domains_list').innerHTML=domh}catch(e){}}
-function bvr(n,ip,iv){let btn=iv?'<span class="active-badge gradient-bg">Включено</span>':`<button class="btn-action" onclick="toggleVpn('${ip}','add')">Включить</button>`;return `<div class="list-row"><div><span class="item-name">${n}</span><span class="item-sub">${ip}</span></div>${btn}</div>`}
-async function toggleVpn(ip,a){showLoader();try{await api('manage_vpn',{ip:ip,action:a});await new Promise(r=>setTimeout(r,3e3));await loadNetwork()}catch(e){alert("Ошибка")}finally{hideLoader()}}
-function addManualIp(){let ip=document.getElementById('manual_ip').value;if(ip)toggleVpn(ip,'add');document.getElementById('manual_ip').value=""}
-async function manageDomain(d,a){showLoader();try{await api('manage_domain',{domain:d,action:a});await new Promise(r=>setTimeout(r,3e3));await loadNetwork()}catch(e){alert("Ошибка")}finally{hideLoader()}}
-function addDomain(){let d=document.getElementById('new_domain').value;if(d)manageDomain(d,'add');document.getElementById('new_domain').value=""}
-async function checkForUpdates(){showLoader();try{let r=await api('check_for_update');if(r.status==="update_available"){if(confirm(`Доступна новая версия ${r.remote_v} (у вас ${r.local_v}). Обновить?`)){showLoader();await api('perform_update');await new Promise(r=>setTimeout(r,5e3));location.reload()}}else if(r.status==="up_to_date"){alert(`У вас последняя версия (${r.local_v}).`)}else{alert("Ошибка проверки.")}}catch(e){alert("Сбой сети.")}finally{hideLoader()}}
+    function normalizeUrl(url) {
+        return url.replace(/&sid=[a-zA-Z0-9]+/g, '');
+    }
+    let globalNodes=[],activeUrl="",vpnIps=[],domains=[];function showLoader(){document.getElementById('preloader').style.display='flex'}
+    function hideLoader(){document.getElementById('preloader').style.display='none'}
+    async function api(m,p={}){p.method=m;let qs=Object.keys(p).map(k=>k+'='+encodeURIComponent(p[k])).join('&');let r=await fetch('/cgi-bin/rpc?'+qs);return await r.json()}
+    window.onload=async function(){api('get_sub_url').then(r=>{if(r.url)document.getElementById('sub_url').value=r.url});api('get_panel_info').then(r=>{if(r.version)document.getElementById('footer').innerHTML=`Версия: ${r.version} <button class="btn-action" style="margin-left:10px;padding:6px 12px;font-size:12px" onclick="checkForUpdates()">Обновить</button>`});loadData();loadNetwork()};async function loadData(){try{let d=await api('get_nodes');globalNodes=d.nodes||[];activeUrl=d.active_url||"";let et=d.expire?"Истекает: "+d.expire:"Нет данных о подписке";document.getElementById('sub_meta').innerText=et;let an="Нет подключения";if(activeUrl){let normActiveUrl=normalizeUrl(activeUrl.trim());let n=globalNodes.find(x=>normalizeUrl(x.full_url.trim())===normActiveUrl);if(n)an=n.name;else{let m=activeUrl.match(/#(.*)$/);if(m)an=decodeURIComponent(m[1])}}document.getElementById('active_name').innerText=an;renderNodes()}catch(e){}}
+    function renderNodes(){let div=document.getElementById("nodes_list");if(globalNodes.length===0){div.innerHTML='<div style="padding:16px 0;text-align:center">Список пуст</div>';return}let h="";let normActiveUrl=normalizeUrl(activeUrl.trim());globalNodes.forEach((n,i)=>{let isNodeActive=normalizeUrl(n.full_url.trim())===normActiveUrl;let btn=isNodeActive?'<span class="active-badge gradient-bg">Активен</span>':`<button class="btn-action" onclick="connect(${i})">Подключить</button>`;h+=`<div class="list-row"><div><span class="item-name">${n.name}</span></div><div><span class="item-ping" id="ping_${i}">-</span> ${btn}</div></div>`});div.innerHTML=h}
+    async function updateSubs(){showLoader();try{let r=await api('update_subs',{});if(r.status==='ok')await loadData();else alert("Ошибка: "+(r.msg||"Неизвестная"))}catch(e){alert("Сбой сети")}finally{hideLoader()}}
+    async function saveUrl(){let u=document.getElementById('sub_url').value;if(!u)return;showLoader();try{await api('update_subs',{url:u});await loadData()}catch(e){alert("Ошибка")}finally{hideLoader()}}
+    async function connect(i){if(!confirm(`Подключиться к ${globalNodes[i].name}?`))return;showLoader();try{await api('apply',{node_url:globalNodes[i].full_url});await new Promise(r=>setTimeout(r,2500));await loadData()}catch(e){alert("Ошибка")}finally{hideLoader()}}
+    async function pingAll(){for(let i=0;i<globalNodes.length;i++){let e=document.getElementById(`ping_${i}`);e.innerText="...";api('ping',{host:globalNodes[i].host}).then(r=>{e.innerText=r.time||"Error"})}}
+    async function loadNetwork(){try{let d=await api('get_network');let c=d.clients||[];vpnIps=d.vpn_ips;if(!Array.isArray(vpnIps))vpnIps=[];domains=d.domains;if(!Array.isArray(domains))domains=[];let vh="";vpnIps.forEach(ip=>{let f=c.find(x=>x.ip===ip);if(!f)vh+=bvr("Static IP",ip,!0)});c.forEach(x=>{let iv=vpnIps.includes(x.ip);vh+=bvr(x.name,x.ip,iv)});if(vh==="")vh="<div class='list-row' style='justify-content:center'>Нет устройств</div>";document.getElementById("vpn_list").innerHTML=vh;let domh="";if(domains.length>0)domains.forEach(dom=>{domh+=`<div class="list-row"><div><span class="item-name">${dom}</span></div><button class="btn-action" onclick="manageDomain('${dom}','del')">Удалить</button></div>`});else domh="<div class='list-row' style='justify-content:center'>Список пуст</div>";document.getElementById('domains_list').innerHTML=domh}catch(e){}}
+    function bvr(n,ip,iv){let btn=iv?`<button class="active-badge gradient-bg" onclick="toggleVpn('${ip}','del')">Включено</button>`:`<button class="btn-action" onclick="toggleVpn('${ip}','add')">Включить</button>`;return `<div class="list-row"><div><span class="item-name">${n}</span><span class="item-sub">${ip}</span></div>${btn}</div>`}
+    async function toggleVpn(ip,a){showLoader();try{await api('manage_vpn',{ip:ip,action:a});await new Promise(r=>setTimeout(r,3e3));await loadNetwork()}catch(e){alert("Ошибка")}finally{hideLoader()}}
+    function addManualIp(){let ip=document.getElementById('manual_ip').value;if(ip)toggleVpn(ip,'add');document.getElementById('manual_ip').value=""}
+    async function manageDomain(d,a){showLoader();try{await api('manage_domain',{domain:d,action:a});await new Promise(r=>setTimeout(r,3e3));await loadNetwork()}catch(e){alert("Ошибка")}finally{hideLoader()}}
+    function addDomain(){let d=document.getElementById('new_domain').value;if(d)manageDomain(d,'add');document.getElementById('new_domain').value=""}
+    async function checkForUpdates(){showLoader();try{let r=await api('check_for_update');if(r.status==="update_available"){if(confirm(`Доступна новая версия ${r.remote_v} (у вас ${r.local_v}). Обновить?`)){showLoader();await api('perform_update');await new Promise(r=>setTimeout(r,5e3));location.reload()}}else if(r.status==="up_to_date"){alert(`У вас последняя версия (${r.local_v}).`)}else{alert("Ошибка проверки.")}}catch(e){alert("Сбой сети.")}finally{hideLoader()}}
 </script>
 </body>
 </html>
