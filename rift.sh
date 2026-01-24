@@ -1,17 +1,19 @@
 #!/bin/sh
+# === RIFT PANEL INSTALLER & UPDATER (V2.6 - All Fixes, NO CURL) ===
+# Run (safer):  wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh | sh
+# Your command also works if supported: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 
-# === RIFT PANEL INSTALLER & UPDATER (V25 - Subscription Fix + Better Errors) ===
-SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
-PANEL_VERSION="2.5"
+PANEL_VERSION="2.6"
+REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 echo "=== УСТАНОВКА RIFT PANEL v${PANEL_VERSION} ==="
 
-# 1. Зависимости
+# 1) deps (NO curl)
 echo "[1/7] Установка пакетов..."
 opkg update >/dev/null 2>&1
-opkg install curl ca-bundle coreutils-base64 lua >/dev/null 2>&1
+opkg install ca-bundle coreutils-base64 lua uclient-fetch >/dev/null 2>&1 || true
 
-# 2. Структура
+# 2) structure
 echo "[2/7] Настройка системы..."
 mkdir -p /www/podkop_panel/cgi-bin
 mkdir -p /etc/podkop_data
@@ -21,7 +23,7 @@ if [ ! -s /etc/config/podkop_subs ]; then
 fi
 echo "${PANEL_VERSION}" > /etc/podkop_data/version
 
-# 3. uhttpd
+# 3) uhttpd
 echo "[3/7] Настройка веб-сервера (порт 2017)..."
 uci -q delete uhttpd.podkop_panel
 uci set uhttpd.podkop_panel=uhttpd
@@ -30,9 +32,9 @@ uci set uhttpd.podkop_panel.home='/www/podkop_panel'
 uci set uhttpd.podkop_panel.rfc1918_filter='0'
 uci set uhttpd.podkop_panel.max_requests='10'
 uci set uhttpd.podkop_panel.cgi_prefix='/cgi-bin'
-uci commit uhttpd
+uci commit uhttpd >/dev/null 2>&1
 
-# 4. Удаляем домен rift
+# 4) remove rift domain (IP only)
 echo "[4/7] Удаление домена rift (если был ранее)..."
 for s in $(uci show dhcp 2>/dev/null | sed -n "s/^\(dhcp\.@domain\[[0-9]\+\]\)=domain.*/\1/p"); do
   [ "$(uci -q get ${s}.name)" = "rift" ] && uci delete "$s"
@@ -40,24 +42,37 @@ done
 uci -q del_list dhcp.@dnsmasq[0].rebind_domain='rift'
 uci commit dhcp >/dev/null 2>&1
 
-# 5. Backend (RPC)
+# 5) Backend (RPC) - NO curl, supports base64 + urlsafe base64, fixes [] vs {}
 echo "[5/7] Запись Backend скрипта..."
-cat << 'EOF' > /www/podkop_panel/cgi-bin/rpc
+cat <<'EOF' > /www/podkop_panel/cgi-bin/rpc
 #!/usr/bin/lua
 
 function trim(s) return (tostring(s or ""):gsub("^%s*(.-)%s*$", "%1")) end
 function shq(s) s=tostring(s or "") return "'"..s:gsub("'", "'\\''").."'" end
 
+-- treat empty table as [] when intended list
+local function is_array(tbl)
+  if type(tbl) ~= "table" then return false end
+  local n, max = 0, 0
+  for k,_ in pairs(tbl) do
+    if type(k) ~= "number" then return false end
+    if k <= 0 or (k % 1) ~= 0 then return false end
+    if k > max then max = k end
+    n = n + 1
+  end
+  if n == 0 then return true end
+  return max == n
+end
+
 function to_json(val)
   local t=type(val)
   if t=="table" then
-    local is_array=(#val>0)
     local parts={}
-    if is_array then
-      for _,v in ipairs(val) do table.insert(parts,to_json(v)) end
+    if is_array(val) then
+      for i=1,#val do parts[#parts+1]=to_json(val[i]) end
       return "["..table.concat(parts,",").."]"
     else
-      for k,v in pairs(val) do table.insert(parts,'"'..k..'":'..to_json(v)) end
+      for k,v in pairs(val) do parts[#parts+1]='"'..k..'":'..to_json(v) end
       return "{"..table.concat(parts,",").."}"
     end
   elseif t=="string" then
@@ -76,7 +91,7 @@ function serialize(val)
     local parts={}
     for k,v in pairs(val) do
       local key=(type(k)=="number") and "" or ('["'..k..'"]=')
-      table.insert(parts, key..serialize(v))
+      parts[#parts+1]=key..serialize(v)
     end
     return "{"..table.concat(parts,",").."}"
   elseif t=="string" then
@@ -100,7 +115,7 @@ function uci_set(c,s,o,v)
   exec_silent("uci set "..c.."."..s.."."..o.."='"..safe.."'")
 end
 
--- version compare (2.10 > 2.5)
+-- version compare (2.10 > 2.6)
 local function parse_ver(v)
   local t={}
   for n in tostring(v or ""):gmatch("(%d+)") do t[#t+1]=tonumber(n) end
@@ -116,7 +131,29 @@ local function cmp_ver(a,b)
   return 0
 end
 
--- parse query
+-- fetch helper: uclient-fetch (preferred) -> wget (busybox)
+local function cmd_exists(bin)
+  local r = exec_silent("command -v "..bin)
+  return (r==0) or (r==true)
+end
+
+local HAS_UCLIENT = cmd_exists("uclient-fetch")
+
+local function fetch_to_file(url, out, err)
+  exec_silent("rm -f "..out.." "..err)
+  local ua = "Mozilla/5.0"
+  local cmd
+  if HAS_UCLIENT then
+    -- uclient-fetch doesn't need UA usually
+    cmd = "uclient-fetch -q -O "..out.." "..shq(url).." 2>"..err
+  else
+    cmd = "wget -q -T 25 -U "..shq(ua).." -O "..out.." "..shq(url).." 2>"..err
+  end
+  local rc = os.execute(cmd)
+  return (rc==0) or (rc==true)
+end
+
+-- parse query string
 local qs=os.getenv("QUERY_STRING") or ""
 local params={}
 for k,v in string.gmatch(qs,"([^&=]+)=([^&=]*)") do
@@ -126,59 +163,16 @@ local method=params.method
 
 print("Content-type: application/json; charset=utf-8\n")
 
-if method=="get_panel_info" then
-  local f=io.open("/etc/podkop_data/version","r")
-  local v=f and f:read("*a") or "0.0"
-  if f then f:close() end
-  print(to_json({version=trim(v)}))
-  os.exit(0)
-end
+local REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
-if method=="check_for_update" then
-  local remote_script=exec_read("curl -fsSL --connect-timeout 6 --max-time 12 " .. shq("https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh") .. " 2>/dev/null")
-  local remote_version=remote_script:match('PANEL_VERSION="([%d%.]+)"')
-  local f=io.open("/etc/podkop_data/version","r")
-  local local_version=f and trim(f:read("*a")) or "0.0"
-  if f then f:close() end
-
-  if remote_version and local_version then
-    if cmp_ver(remote_version, local_version)==1 then
-      print(to_json({status="update_available",local_v=local_version,remote_v=remote_version}))
-    else
-      print(to_json({status="up_to_date",local_v=local_version,remote_v=remote_version}))
-    end
-  else
-    print(to_json({status="error", msg="Не удалось получить версию с GitHub"}))
-  end
-  os.exit(0)
-end
-
-if method=="perform_update" then
-  exec_silent("sh -c " .. shq("curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh | sh"))
-  print('{"status":"ok"}')
-  os.exit(0)
-end
-
-if method=="get_nodes" then
-  local s,db=pcall(dofile,"/etc/podkop_data/nodes.lua")
-  if not s or type(db)~="table" then db={nodes={}} end
-  local cp=uci_get("podkop","main","proxy_string")
-  local r=exec_silent("pgrep -f podkop")
-  local rn=(r==0)or(r==true)
-  local dp=(cp or ""):gsub("%%20"," ")
-  print(to_json({nodes=db.nodes or{},expire=db.expire or"Нет данных",updated=db.updated or"Никогда",active_url=dp,running=rn}))
-  os.exit(0)
-end
-
--- extract links anywhere in text (not only line-start)
+-- link parsing: finds links ANYWHERE in text (decoded or plain)
 local function extract_links(text)
   local out={}
   if not text then return out end
 
   local function push(u)
     if not u or u=="" then return end
-    u = u:gsub("[\"'%)]*$","")
-    u = u:gsub("[,;]+$","")
+    u = u:gsub("[\"'%)]*$",""):gsub("[,;]+$","")
     out[#out+1]=u
   end
 
@@ -205,18 +199,14 @@ end
 
 local function parse_nodes_any(text)
   local nodes={}
-  local links=extract_links(text)
-  for _,u in ipairs(links) do
-    nodes[#nodes+1]=link_to_node(u)
-  end
+  local links=extract_links(text or "")
+  for _,u in ipairs(links) do nodes[#nodes+1]=link_to_node(u) end
   return nodes
 end
 
 local function b64_urlsafefix(s)
   s = (s or ""):gsub("%s+","")
-  -- urlsafe -> standard
   s = s:gsub("-", "+"):gsub("_", "/")
-  -- add padding
   while (#s % 4) ~= 0 do s = s .. "=" end
   return s
 end
@@ -224,11 +214,79 @@ end
 local function try_decode_base64(raw)
   if not raw then return "" end
   local t = raw:gsub("%s+","")
-  -- allow urlsafe chars too
+  if #t < 16 then return "" end
   if not t:match("^[%w%+/%=_%-%s]+$") then return "" end
   t = b64_urlsafefix(t)
   local dec = exec_read("printf %s " .. shq(t) .. " | base64 -d 2>/dev/null")
   return dec or ""
+end
+
+-- RPC methods
+if method=="get_panel_info" then
+  local f=io.open("/etc/podkop_data/version","r")
+  local v=f and f:read("*a") or "0.0"
+  if f then f:close() end
+  print(to_json({version=trim(v)}))
+  os.exit(0)
+end
+
+if method=="check_for_update" then
+  local tmp="/tmp/rift_remote.sh"
+  local err="/tmp/rift_remote.err"
+  local ok = fetch_to_file(REMOTE_SCRIPT_URL, tmp, err)
+  if not ok then
+    print(to_json({status="error", msg="Не удалось скачать обновление", sample=exec_read("cat "..err.." 2>/dev/null | head -c 160")}))
+    os.exit(0)
+  end
+  local remote_script = exec_read("cat "..tmp.." 2>/dev/null")
+  local remote_version = remote_script:match('PANEL_VERSION="([%d%.]+)"')
+
+  local f=io.open("/etc/podkop_data/version","r")
+  local local_version=f and trim(f:read("*a")) or "0.0"
+  if f then f:close() end
+
+  if remote_version and local_version then
+    if cmp_ver(remote_version, local_version)==1 then
+      print(to_json({status="update_available",local_v=local_version,remote_v=remote_version}))
+    else
+      print(to_json({status="up_to_date",local_v=local_version,remote_v=remote_version}))
+    end
+  else
+    print(to_json({status="error", msg="Не удалось распарсить версию"}))
+  end
+  os.exit(0)
+end
+
+if method=="perform_update" then
+  local tmp="/tmp/rift_update.sh"
+  local err="/tmp/rift_update.err"
+  local ok = fetch_to_file(REMOTE_SCRIPT_URL, tmp, err)
+  if not ok then
+    print(to_json({status="error", msg="Не удалось скачать скрипт обновления", sample=exec_read("cat "..err.." 2>/dev/null | head -c 160")}))
+    os.exit(0)
+  end
+  exec_silent("sh "..tmp)
+  print('{"status":"ok"}')
+  os.exit(0)
+end
+
+if method=="get_nodes" then
+  local s,db=pcall(dofile,"/etc/podkop_data/nodes.lua")
+  if not s or type(db)~="table" then db={nodes={}} end
+  if type(db.nodes)~="table" then db.nodes={} end
+
+  local cp=uci_get("podkop","main","proxy_string")
+  local r=exec_silent("pgrep -f podkop")
+  local rn=(r==0)or(r==true)
+  local dp=(cp or ""):gsub("%%20"," ")
+  print(to_json({
+    nodes=db.nodes,              -- important: empty becomes []
+    expire=db.expire or "Нет данных",
+    updated=db.updated or "Никогда",
+    active_url=dp,
+    running=rn
+  }))
+  os.exit(0)
 end
 
 if method=="update_subs" then
@@ -239,68 +297,27 @@ if method=="update_subs" then
     os.exit(0)
   end
 
-  -- save URL
+  -- save url
   exec_silent("uci -q delete podkop_subs.config.url")
   uci_set("podkop_subs","config","url",url)
   exec_silent("uci commit podkop_subs")
 
-  -- headers + body to temp with HTTP code
-  local H="/tmp/podkop_sub.hdr"
-  local B="/tmp/podkop_sub.body"
-  exec_silent("rm -f "..H.." "..B)
+  local body="/tmp/podkop_sub.body"
+  local err="/tmp/podkop_sub.err"
+  local ok = fetch_to_file(url, body, err)
+  local raw = exec_read("cat "..body.." 2>/dev/null")
+  local e   = exec_read("cat "..err.." 2>/dev/null")
 
-  local http_code = exec_read("curl -sS -L --connect-timeout 10 --max-time 25 -A 'Mozilla/5.0' -D "..H.." -o "..B.." -w '%{http_code}' "..shq(url).." 2>/tmp/podkop_sub.err")
-  http_code = trim(http_code)
-  local err = exec_read("cat /tmp/podkop_sub.err 2>/dev/null")
-
-  local hdr_raw = exec_read("cat "..H.." 2>/dev/null")
-  local hdr_low = (hdr_raw or ""):lower()
-  local ctype = hdr_low:match("content%-type:%s*([^\r\n]+)") or ""
-
-  -- subscription meta
-  local ei="Неизвестно"
-  local ui = hdr_low:match("subscription%-userinfo:%s*([^\r\n]+)")
-  if ui then
-    local et=ui:match("expire=(%d+)")
-    if et then
-      ei=os.date("%Y-%m-%d",tonumber(et))
-      local total=ui:match("total=(%d+)")
-      local dl=ui:match("download=(%d+)")
-      if total and dl then
-        local lgb=math.floor((tonumber(total)-tonumber(dl))/1073741824*100)/100
-        ei=ei.." (Ост: "..lgb.." GB)"
-      end
-    end
-  end
-  if ei=="Неизвестно" then
-    local t64 = hdr_raw:match("profile%-title:%s*base64:([%w%+/=]+)")
-    if t64 then
-      local dec=exec_read("echo "..shq(t64).." | base64 -d 2>/dev/null")
-      dec=(dec or ""):gsub("RIFT",""):gsub("\n"," "):gsub("^%s+","")
-      if dec~="" then ei=dec end
-    end
-  end
-
-  local raw = exec_read("cat "..B.." 2>/dev/null")
-  raw = raw or ""
-
-  -- curl-level error (often TLS/resolve)
-  if (err and err:match("curl:")) and (raw=="" or raw:match("^curl:")) then
-    print(to_json({status="error", msg=("curl: "..(err:gsub("\n"," "):sub(1,220))), http=http_code, ctype=ctype}))
+  if (not ok) or raw=="" then
+    local sample = (e ~= "" and e:gsub("\n"," "):sub(1,220)) or "empty body"
+    print(to_json({status="error", msg="Ошибка загрузки подписки", sample=sample}))
     os.exit(0)
   end
 
-  -- non-200 debug
-  if http_code ~= "" and http_code ~= "200" and http_code ~= "204" then
-    local sample = raw:gsub("\n"," "):sub(1,180)
-    print(to_json({status="error", msg=("HTTP "..http_code.." ("..ctype..")"), sample=sample}))
-    os.exit(0)
-  end
-
-  -- parse plain
+  -- 1) parse raw
   local nodes = parse_nodes_any(raw)
 
-  -- parse base64 (standard + urlsafe)
+  -- 2) parse decoded base64 (standard + urlsafe)
   local decoded = ""
   if #nodes == 0 then
     decoded = try_decode_base64(raw)
@@ -312,22 +329,17 @@ if method=="update_subs" then
   if #nodes == 0 then
     local s1 = raw:gsub("\n"," "):sub(1,180)
     local s2 = (decoded ~= "" and decoded:gsub("\n"," "):sub(1,180)) or ""
-    local extra = ""
-    if s2 ~= "" then extra = " | decoded: "..s2 end
-    print(to_json({
-      status="error",
-      msg="Серверы не найдены. Нет ссылок vless/trojan/ss/vmess/hysteria2/tuic в ответе.",
-      sample=("raw: "..s1..extra)
-    }))
+    local extra = (s2 ~= "" and (" | decoded: "..s2)) or ""
+    print(to_json({status="error", msg="Серверы не найдены в ответе подписки", sample=("raw: "..s1..extra)}))
     os.exit(0)
   end
 
-  local db={expire=ei,updated=os.date("%Y-%m-%d %H:%M:%S"),nodes=nodes}
+  local db={expire="Нет данных", updated=os.date("%Y-%m-%d %H:%M:%S"), nodes=nodes}
   local f=io.open("/etc/podkop_data/nodes.lua","w")
   if f then
     f:write("return "..serialize(db))
     f:close()
-    print(to_json({status="ok",count=#nodes,expire=ei}))
+    print(to_json({status="ok", count=#nodes, expire=db.expire}))
   else
     print('{"status":"error","msg":"Ошибка записи nodes.lua"}')
   end
@@ -431,9 +443,9 @@ end
 print('{"status":"error","msg":"unknown method"}')
 EOF
 
-# 6. Frontend (HTML) — показывает msg + sample
+# 6) Frontend (HTML) - errors visible, nodes always array-safe
 echo "[6/7] Запись Frontend интерфейса..."
-cat << 'EOF' > /www/podkop_panel/index.html
+cat <<'EOF' > /www/podkop_panel/index.html
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -445,41 +457,36 @@ cat << 'EOF' > /www/podkop_panel/index.html
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background-color:var(--bg-color);margin:0;padding:20px;color:var(--text-primary)}
     .container{max-width:500px;margin:0 auto}
-    .header{text-align:center;margin-bottom:30px}
-    .logo-svg{width:80px;height:80px}
-    h1{font-size:24px;font-weight:700;color:var(--text-primary);margin:10px 0 0}
-    .card{background:var(--card-bg);border-radius:24px;padding:24px;margin-bottom:20px;box-shadow:0 8px 32px 0 rgba(0,0,0,.05)}
-    h3{margin:0 0 20px;font-weight:600;font-size:18px;color:var(--text-primary)}
+    .header{text-align:center;margin-bottom:20px}
+    h1{font-size:26px;font-weight:800;margin:0}
+    .card{background:var(--card-bg);border-radius:24px;padding:24px;margin-bottom:18px;box-shadow:0 8px 32px rgba(0,0,0,.05)}
+    h3{margin:0 0 16px;font-weight:700;font-size:16px}
     .gradient-bg{background-image:linear-gradient(90deg,var(--grad-start) 0,var(--grad-end) 100%)}
     .active-conn-card{color:#fff;text-align:center}
-    .active-conn-card h3{color:rgba(255,255,255,.8);font-size:14px;font-weight:500}
-    .server-name-big{font-size:24px;font-weight:700;margin-bottom:8px;display:block}
-    .server-meta{color:rgba(255,255,255,.8);font-size:14px}
-    .btn-update{background:rgba(255,255,255,.2);color:#fff;width:100%;padding:12px;border:1px solid rgba(255,255,255,.3);border-radius:12px;font-weight:600;font-size:14px;cursor:pointer;margin-top:20px}
-    .list-row{display:flex;align-items:center;justify-content:space-between;padding:16px 0;border-bottom:1px solid #E9EFFE}
+    .active-conn-card h3{color:rgba(255,255,255,.85);font-size:13px;font-weight:600;letter-spacing:.3px}
+    .server-name-big{font-size:22px;font-weight:800;margin:8px 0 6px;display:block}
+    .server-meta{color:rgba(255,255,255,.85);font-size:13px}
+    .btn-update{background:rgba(255,255,255,.18);color:#fff;width:100%;padding:12px;border:1px solid rgba(255,255,255,.28);border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;margin-top:14px}
+    .list-row{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid #E9EFFE}
     .list-row:last-child{border-bottom:none;padding-bottom:0}
-    .list-row:first-child{padding-top:0}
-    .item-name{font-weight:600;font-size:15px}
-    .item-sub{display:block;font-size:13px;color:var(--text-secondary)}
-    .item-ping{font-size:14px;margin-right:16px;font-weight:600;color:var(--text-primary)}
-    .btn-action,.active-badge{background:#EEF2FF;border:1px solid #EEF2FF;color:#4A55E0;padding:8px 16px;border-radius:20px;font-size:13px;font-weight:600;cursor:pointer;text-align:center;display:inline-block}
+    .item-name{font-weight:700;font-size:14px}
+    .item-sub{display:block;font-size:12px;color:var(--text-secondary)}
+    .btn-action,.active-badge{background:#EEF2FF;border:1px solid #EEF2FF;color:#4A55E0;padding:8px 14px;border-radius:20px;font-size:12px;font-weight:800;cursor:pointer}
     .active-badge{color:#fff;cursor:default}
-    .input-group{display:flex;gap:10px;margin-top:20px}
-    input[type=text]{background:#F7FAFC;border:1px solid #E2E8F0;color:var(--text-primary);padding:12px;border-radius:12px;width:100%;box-sizing:border-box;font-size:14px}
-    .btn-apply{color:#fff;border:none;padding:0 20px;border-radius:12px;cursor:pointer;font-size:14px;font-weight:600}
-    .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);backdrop-filter:blur(5px);z-index:9999;display:none;justify-content:center;align-items:center}
-    .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,.1);border-top:4px solid #fff;border-radius:50%;animation:spin 1s linear infinite}
+    .input-group{display:flex;gap:10px;margin-top:14px}
+    input[type=text]{background:#F7FAFC;border:1px solid #E2E8F0;color:var(--text-primary);padding:12px;border-radius:12px;width:100%;box-sizing:border-box;font-size:13px}
+    .btn-apply{color:#fff;border:none;padding:0 18px;border-radius:12px;cursor:pointer;font-size:13px;font-weight:800}
+    .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.65);backdrop-filter:blur(5px);z-index:9999;display:none;justify-content:center;align-items:center}
+    .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,.12);border-top:4px solid #fff;border-radius:50%;animation:spin 1s linear infinite}
     @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
   <div id="preloader" class="preloader-overlay"><div class="spinner"></div></div>
-  <div id="toast" style="display:none;position:fixed;left:12px;right:12px;bottom:12px;padding:12px 14px;border-radius:14px;background:#111;color:#fff;z-index:10000;font-size:14px;box-shadow:0 12px 40px rgba(0,0,0,.25)"></div>
+  <div id="toast" style="display:none;position:fixed;left:12px;right:12px;bottom:12px;padding:12px 14px;border-radius:14px;background:#111;color:#fff;z-index:10000;font-size:13px;box-shadow:0 12px 40px rgba(0,0,0,.25)"></div>
 
   <div class="container">
-    <header class="header">
-      <h1>RIFT</h1>
-    </header>
+    <header class="header"><h1>RIFT</h1></header>
 
     <div class="card active-conn-card gradient-bg">
       <h3>АКТИВНОЕ ПОДКЛЮЧЕНИЕ</h3>
@@ -503,7 +510,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
         <input type="text" id="manual_ip" placeholder="IP адрес (192.168.1.X)">
         <button class="btn-apply gradient-bg" onclick="addManualIp()">+</button>
       </div>
-      <div id="vpn_list" style="margin-top:15px"></div>
+      <div id="vpn_list" style="margin-top:12px"></div>
     </div>
 
     <div class="card">
@@ -512,17 +519,18 @@ cat << 'EOF' > /www/podkop_panel/index.html
         <input type="text" id="new_domain" placeholder="domain.com">
         <button class="btn-apply gradient-bg" onclick="addDomain()">+</button>
       </div>
-      <div id="domains_list" style="margin-top:15px"></div>
+      <div id="domains_list" style="margin-top:12px"></div>
     </div>
 
-    <div class="card" style="text-align:center;font-size:14px;color:var(--text-secondary)" id="footer"></div>
+    <div class="card" style="text-align:center;font-size:12px;color:var(--text-secondary)" id="footer"></div>
   </div>
 
 <script>
   function normalizeUrl(url){ return (url||"").replace(/&sid=[a-zA-Z0-9]+/g,''); }
+
   let globalNodes=[], activeUrl="", vpnIps=[], domains=[];
 
-  function showToast(msg, ms=7000){
+  function showToast(msg, ms=9000){
     const el=document.getElementById('toast');
     el.textContent=msg;
     el.style.display='block';
@@ -557,7 +565,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
       const r=await api('get_panel_info');
       if(r.version){
         document.getElementById('footer').innerHTML =
-          `Версия: ${r.version} <button class="btn-action" style="margin-left:10px;padding:6px 12px;font-size:12px" onclick="checkForUpdates()">Обновить</button>`;
+          `Версия: ${r.version} <button class="btn-action" style="margin-left:10px;padding:6px 12px;font-size:11px" onclick="checkForUpdates()">Обновить</button>`;
       }
     }catch(e){ showToast(e.message); }
 
@@ -568,12 +576,13 @@ cat << 'EOF' > /www/podkop_panel/index.html
   async function loadData(){
     try{
       const d=await api('get_nodes');
-      globalNodes=d.nodes||[];
+      globalNodes = Array.isArray(d.nodes) ? d.nodes : [];
       activeUrl=d.active_url||"";
+
       document.getElementById('sub_meta').innerText = d.expire ? ("Истекает: "+d.expire) : "Нет данных о подписке";
 
       let an="Нет подключения";
-      if(activeUrl){
+      if(activeUrl && globalNodes.length){
         const norm=normalizeUrl(activeUrl.trim());
         const n=globalNodes.find(x=>normalizeUrl((x.full_url||"").trim())===norm);
         if(n) an=n.name;
@@ -589,8 +598,8 @@ cat << 'EOF' > /www/podkop_panel/index.html
 
   function renderNodes(){
     const div=document.getElementById("nodes_list");
-    if(globalNodes.length===0){
-      div.innerHTML='<div style="padding:16px 0;text-align:center">Список пуст</div>';
+    if(!globalNodes.length){
+      div.innerHTML='<div style="padding:14px 0;text-align:center;color:#718096">Список пуст</div>';
       return;
     }
     let h="";
@@ -610,7 +619,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
       const r=await api('update_subs', {});
       showToast(`Подписка обновлена. Серверов: ${r.count||"?"}`);
       await loadData();
-    }catch(e){ showToast("updateSubs: "+e.message, 10000); }
+    }catch(e){ showToast("updateSubs: "+e.message, 12000); }
     finally{ hideLoader(); }
   }
 
@@ -622,7 +631,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
       const r=await api('update_subs', {url:u});
       showToast(`Ссылка сохранена. Серверов: ${r.count||"?"}`);
       await loadData();
-    }catch(e){ showToast("Подписка: "+e.message, 10000); }
+    }catch(e){ showToast("Подписка: "+e.message, 12000); }
     finally{ hideLoader(); }
   }
 
@@ -633,7 +642,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
       await api('apply',{node_url:globalNodes[i].full_url});
       await new Promise(r=>setTimeout(r,2500));
       await loadData();
-    }catch(e){ showToast("connect: "+e.message, 10000); }
+    }catch(e){ showToast("connect: "+e.message, 12000); }
     finally{ hideLoader(); }
   }
 
@@ -651,16 +660,16 @@ cat << 'EOF' > /www/podkop_panel/index.html
                        : `<button class="btn-action" onclick="toggleVpn('${x.ip}','add')">Включить</button>`;
         vh += `<div class="list-row"><div><span class="item-name">${x.name}</span><span class="item-sub">${x.ip}</span></div>${btn}</div>`;
       });
-      if(vh==="") vh="<div class='list-row' style='justify-content:center'>Нет устройств</div>";
+      if(vh==="") vh="<div class='list-row' style='justify-content:center;color:#718096'>Нет устройств</div>";
       document.getElementById("vpn_list").innerHTML=vh;
 
       let domh="";
-      if(domains.length>0){
+      if(domains.length){
         domains.forEach(dom=>{
           domh += `<div class="list-row"><div><span class="item-name">${dom}</span></div><button class="btn-action" onclick="manageDomain('${dom}','del')">Удалить</button></div>`;
         });
       }else{
-        domh="<div class='list-row' style='justify-content:center'>Список пуст</div>";
+        domh="<div class='list-row' style='justify-content:center;color:#718096'>Список пуст</div>";
       }
       document.getElementById('domains_list').innerHTML=domh;
     }catch(e){ showToast("loadNetwork: "+e.message); }
@@ -670,9 +679,9 @@ cat << 'EOF' > /www/podkop_panel/index.html
     showLoader();
     try{
       await api('manage_vpn',{ip:ip,action:a});
-      await new Promise(r=>setTimeout(r,3000));
+      await new Promise(r=>setTimeout(r,2000));
       await loadNetwork();
-    }catch(e){ showToast("VPN: "+e.message, 10000); }
+    }catch(e){ showToast("VPN: "+e.message, 12000); }
     finally{ hideLoader(); }
   }
 
@@ -686,9 +695,9 @@ cat << 'EOF' > /www/podkop_panel/index.html
     showLoader();
     try{
       await api('manage_domain',{domain:d,action:a});
-      await new Promise(r=>setTimeout(r,3000));
+      await new Promise(r=>setTimeout(r,2000));
       await loadNetwork();
-    }catch(e){ showToast("Domains: "+e.message, 10000); }
+    }catch(e){ showToast("Domains: "+e.message, 12000); }
     finally{ hideLoader(); }
   }
 
@@ -705,7 +714,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
       if(r.status==="update_available"){
         if(confirm(`Доступна новая версия ${r.remote_v} (у вас ${r.local_v}). Обновить?`)){
           await api('perform_update');
-          await new Promise(r=>setTimeout(r,5000));
+          await new Promise(r=>setTimeout(r,4000));
           location.reload();
         }
       }else if(r.status==="up_to_date"){
@@ -713,7 +722,7 @@ cat << 'EOF' > /www/podkop_panel/index.html
       }else{
         showToast("Ошибка проверки обновлений.");
       }
-    }catch(e){ showToast("Updates: "+e.message, 10000); }
+    }catch(e){ showToast("Updates: "+e.message, 12000); }
     finally{ hideLoader(); }
   }
 </script>
@@ -721,20 +730,29 @@ cat << 'EOF' > /www/podkop_panel/index.html
 </html>
 EOF
 
-# 7. Автообновление + cron
+# 7) autoupdate (NO curl)
 echo "[7/7] Настройка автообновления..."
-cat << 'EOF' > /etc/podkop_data/autoupdate.sh
+cat <<'EOF' > /etc/podkop_data/autoupdate.sh
 #!/bin/sh
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 VERSION_FILE="/etc/podkop_data/version"
+TMP="/tmp/rift_remote.sh"
 
 [ -f "$VERSION_FILE" ] || exit 0
 
 LOCAL_VERSION="$(cat "$VERSION_FILE" 2>/dev/null)"
-REMOTE_VERSION="$(curl -fsSL --connect-timeout 8 --max-time 20 "$REMOTE_SCRIPT_URL" 2>/dev/null | sed -n 's/^PANEL_VERSION="\([^"]*\)".*/\1/p' | head -n1)"
+
+# download (prefer uclient-fetch, fallback wget)
+if command -v uclient-fetch >/dev/null 2>&1; then
+  uclient-fetch -q -O "$TMP" "$REMOTE_SCRIPT_URL" >/dev/null 2>&1 || exit 0
+else
+  wget -q -O "$TMP" "$REMOTE_SCRIPT_URL" >/dev/null 2>&1 || exit 0
+fi
+
+REMOTE_VERSION="$(sed -n 's/^PANEL_VERSION="\([^"]*\)".*/\1/p' "$TMP" | head -n1)"
 
 if [ -n "$REMOTE_VERSION" ] && [ -n "$LOCAL_VERSION" ] && [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
-  curl -fsSL --connect-timeout 10 --max-time 30 "$REMOTE_SCRIPT_URL" | sh >/dev/null 2>&1
+  sh "$TMP" >/dev/null 2>&1
 fi
 EOF
 chmod +x /etc/podkop_data/autoupdate.sh
@@ -742,7 +760,7 @@ chmod +x /etc/podkop_data/autoupdate.sh
 CRON_JOB="0 4 * * * /etc/podkop_data/autoupdate.sh"
 (crontab -l 2>/dev/null | grep -Fv "/etc/podkop_data/autoupdate.sh" ; echo "$CRON_JOB") | crontab -
 
-# финал
+# finish
 chmod +x /www/podkop_panel/cgi-bin/rpc
 sed -i 's/\r$//' /www/podkop_panel/cgi-bin/rpc
 
