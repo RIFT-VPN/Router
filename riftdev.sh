@@ -3,7 +3,7 @@
 # Run: wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh | sh
 
 PANEL_VERSION="3.0"
-REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
+REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 echo "=== УСТАНОВКА RIFT PANEL v${PANEL_VERSION} ==="
 
