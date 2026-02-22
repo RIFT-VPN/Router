@@ -2,7 +2,7 @@
 # === RIFT PANEL INSTALLER & UPDATER (V3.0 — Remnawave + HWID + UI/UX) ===
 # Run: wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh | sh
 
-PANEL_VERSION="3.0"
+PANEL_VERSION="3.1"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 echo "=== УСТАНОВКА RIFT PANEL v${PANEL_VERSION} ==="
@@ -201,29 +201,44 @@ print("Content-type: application/json; charset=utf-8\n")
 
 local REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
--- link parsing
+-- link parsing (line-by-line to preserve names with spaces)
+local PROTOCOLS={"vless://","trojan://","ss://","vmess://","hysteria2://","tuic://"}
 local function extract_links(text)
   local out={}
   if not text then return out end
-  local function push(u)
-    if not u or u=="" then return end
-    u = u:gsub("[\"'%)]*$",""):gsub("[,;]+$","")
-    out[#out+1]=u
+  for line in (text.."\n"):gmatch("([^\n]+)") do
+    line=trim(line)
+    if line~="" then
+      for _,proto in ipairs(PROTOCOLS) do
+        if line:sub(1,#proto)==proto then
+          out[#out+1]=line
+          break
+        end
+      end
+    end
   end
-  for u in text:gmatch("(vless://[^%s]+)") do push(u) end
-  for u in text:gmatch("(trojan://[^%s]+)") do push(u) end
-  for u in text:gmatch("(ss://[^%s]+)") do push(u) end
-  for u in text:gmatch("(vmess://[^%s]+)") do push(u) end
-  for u in text:gmatch("(hysteria2://[^%s]+)") do push(u) end
-  for u in text:gmatch("(tuic://[^%s]+)") do push(u) end
   return out
+end
+
+-- safe URL-decode: only decode %XX where XX are valid hex pairs
+local function url_decode_safe(s)
+  if not s then return "" end
+  return s:gsub("%%(%x%x)",function(h) return string.char(tonumber(h,16)) end)
+end
+
+local FILTER_KEYWORDS={"Обход БС","обход бс"}
+local function should_filter(name)
+  for _,kw in ipairs(FILTER_KEYWORDS) do
+    if name:find(kw,1,true) then return true end
+  end
+  return false
 end
 
 local function link_to_node(line)
   local proto=(line:match("^(%w+)://") or "LINK"):upper()
   local ne=line:match("#(.+)$")
   local name="Server"
-  if ne then name=ne:gsub("%%(%x%x)",function(h)return string.char(tonumber(h,16))end) end
+  if ne then name=url_decode_safe(ne) end
   local host=line:match("@(.-):" ) or line:match("://([^/:#%?]+)") or "unknown"
   local ti=proto
   if line:match("security=reality") then ti="Reality" end
@@ -232,8 +247,15 @@ end
 
 local function parse_nodes_any(text)
   local nodes={}
+  local seen={}
   local links=extract_links(text or "")
-  for _,u in ipairs(links) do nodes[#nodes+1]=link_to_node(u) end
+  for _,u in ipairs(links) do
+    local n=link_to_node(u)
+    if not should_filter(n.name) and not seen[n.host] then
+      seen[n.host]=true
+      nodes[#nodes+1]=n
+    end
+  end
   return nodes
 end
 
@@ -873,16 +895,18 @@ function serialize(val)
   else return tostring(val) end
 end
 local function b64fix(s) s=(s or ""):gsub("%s+",""):gsub("-","+"):gsub("_","/") while(#s%4)~=0 do s=s.."=" end return s end
+local PROTOS={"vless://","trojan://","ss://","vmess://","hysteria2://","tuic://"}
 local function extract(text)
   local out={}
   if not text then return out end
-  local function push(u) if not u or u=="" then return end u=u:gsub("[\"'\x29]*$",""):gsub("[,;]+$","") out[#out+1]=u end
-  for u in text:gmatch("(vless://[^%s]+)") do push(u) end
-  for u in text:gmatch("(trojan://[^%s]+)") do push(u) end
-  for u in text:gmatch("(ss://[^%s]+)") do push(u) end
-  for u in text:gmatch("(vmess://[^%s]+)") do push(u) end
-  for u in text:gmatch("(hysteria2://[^%s]+)") do push(u) end
-  for u in text:gmatch("(tuic://[^%s]+)") do push(u) end
+  for line in (text.."\n"):gmatch("([^\n]+)") do
+    line=trim(line)
+    if line~="" then
+      for _,pr in ipairs(PROTOS) do
+        if line:sub(1,#pr)==pr then out[#out+1]=line break end
+      end
+    end
+  end
   return out
 end
 local function tonode(l)
@@ -894,20 +918,28 @@ local function tonode(l)
   local ti=p if l:match("security=reality") then ti="Reality" end
   return {name=nm,host=ho,type=ti,full_url=l}
 end
+local function should_skip(name) return name:find("\208\158\208\177\209\133\208\190\208\180 \208\145\208\161",1,true) end
 local f=io.open("/tmp/podkop_sub_auto.body","r")
 if not f then os.exit(0) end
 local raw=f:read("*a") f:close()
 local nodes={}
-local links=extract(raw)
-for _,u in ipairs(links) do nodes[#nodes+1]=tonode(u) end
+local seen={}
+local function add_links(text)
+  local lnks=extract(text)
+  for _,u in ipairs(lnks) do
+    local n=tonode(u)
+    if not should_skip(n.name) and not seen[n.host] then
+      seen[n.host]=true
+      nodes[#nodes+1]=n
+    end
+  end
+end
+add_links(raw)
 if #nodes==0 then
   local t=raw:gsub("%s+","")
   if #t>=16 and t:match("^[%w%+/%=_%-%s]+$") then
     local dec=exec_read("printf %s "..shq(b64fix(t)).." | base64 -d 2>/dev/null")
-    if dec~="" then
-      local links2=extract(dec)
-      for _,u in ipairs(links2) do nodes[#nodes+1]=tonode(u) end
-    end
+    if dec~="" then add_links(dec) end
   end
 end
 if #nodes>0 then
