@@ -2,7 +2,7 @@
 # === RIFT PANEL INSTALLER & UPDATER (V3.0 — Remnawave + HWID + UI/UX) ===
 # Run: wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh | sh
 
-PANEL_VERSION="3.1"
+PANEL_VERSION="3.4"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 echo "=== УСТАНОВКА RIFT PANEL v${PANEL_VERSION} ==="
@@ -272,8 +272,16 @@ local function try_decode_base64(raw)
   if #t < 16 then return "" end
   if not t:match("^[%w%+/%=_%-%s]+$") then return "" end
   t = b64_urlsafefix(t)
-  local dec = exec_read("printf %s " .. shq(t) .. " | base64 -d 2>/dev/null")
-  return dec or ""
+  local tmp_b64="/tmp/rift_b64.tmp"
+  local tmp_dec="/tmp/rift_dec.tmp"
+  local fb=io.open(tmp_b64,"w")
+  if fb then fb:write(t) fb:close() end
+  exec_silent("base64 -d "..tmp_b64.." > "..tmp_dec.." 2>/dev/null")
+  local fd=io.open(tmp_dec,"r")
+  local dec=""
+  if fd then dec=fd:read("*a") or "" fd:close() end
+  exec_silent("rm -f "..tmp_b64.." "..tmp_dec)
+  return dec
 end
 
 -- RPC methods
@@ -367,6 +375,11 @@ if method=="get_nodes" then
   print(to_json({
     nodes=db.nodes,
     expire=db.expire or "Нет данных",
+    expire_ts=db.expire_ts or 0,
+    expire_days=db.expire_days or 0,
+    sub_download=db.sub_download or 0,
+    sub_total=db.sub_total or 0,
+    sub_title=db.sub_title or "",
     updated=db.updated or "Никогда",
     active_url=dp,
     running=rn
@@ -415,7 +428,57 @@ if method=="update_subs" then
     os.exit(0)
   end
 
-  local db={expire="Нет данных", updated=os.date("%Y-%m-%d %H:%M:%S"), nodes=nodes}
+  -- capture headers for subscription info
+  local expire_ts, expire_days, sub_download, sub_total, sub_title = 0, 0, 0, 0, ""
+  local hdr_file = "/tmp/podkop_sub_hdr.txt"
+  local hdr_cmd
+  if HAS_UCLIENT then
+    hdr_cmd = "uclient-fetch -v -O /dev/null"
+    for _,h in ipairs(hdrs) do hdr_cmd = hdr_cmd.." --header="..shq(h) end
+    hdr_cmd = hdr_cmd.." "..shq(url).." 2>&1 > "..hdr_file
+  else
+    hdr_cmd = "wget --server-response -q -O /dev/null"
+    for _,h in ipairs(hdrs) do hdr_cmd = hdr_cmd.." --header="..shq(h) end
+    hdr_cmd = hdr_cmd.." "..shq(url).." 2>&1 > "..hdr_file
+  end
+  exec_silent(hdr_cmd)
+  local hdr_data = exec_read("cat "..hdr_file.." 2>/dev/null")
+  exec_silent("rm -f "..hdr_file)
+
+  -- parse subscription-userinfo: upload=X; download=X; total=X; expire=X
+  if hdr_data ~= "" then
+    local sui = hdr_data:match("subscription%-userinfo[:%s]*([^\n]+)")
+    if sui then
+      local exp = sui:match("expire=(%d+)")
+      if exp then expire_ts = tonumber(exp) or 0 end
+      local dl = sui:match("download=(%d+)")
+      if dl then sub_download = tonumber(dl) or 0 end
+      local tot = sui:match("total=(%d+)")
+      if tot then sub_total = tonumber(tot) or 0 end
+    end
+    -- parse profile-title for time remaining (e.g. "22D,6H")
+    local pt_line = hdr_data:match("profile%-title[:%s]*([^\n]+)")
+    if pt_line then
+      local pt = pt_line
+      if pt:match("^base64:") then
+        local b64 = pt:gsub("^base64:","")
+        local tmp_b = "/tmp/rift_pt.tmp"
+        local fb = io.open(tmp_b,"w")
+        if fb then fb:write(b64) fb:close() end
+        pt = exec_read("base64 -d "..tmp_b.." 2>/dev/null")
+        exec_silent("rm -f "..tmp_b)
+      end
+      sub_title = pt or ""
+      -- extract days/hours pattern like "22D,6H" or "22D" or "6H"
+      local days = pt:match("(%d+)D")
+      local hours = pt:match("(%d+)H")
+      if days or hours then
+        expire_days = (tonumber(days) or 0) + (tonumber(hours) or 0) / 24
+      end
+    end
+  end
+
+  local db={expire="Нет данных", expire_ts=expire_ts, expire_days=expire_days, sub_download=sub_download, sub_total=sub_total, sub_title=sub_title, updated=os.date("%Y-%m-%d %H:%M:%S"), nodes=nodes}
   local f=io.open("/etc/podkop_data/nodes.lua","w")
   if f then
     f:write("return "..serialize(db))
@@ -534,89 +597,120 @@ cat <<'FRONTEND_EOF' > /www/podkop_panel/index.html
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>RIFT Panel</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <style>
-:root{--bg:#0a0e1a;--card:rgba(255,255,255,.06);--card-border:rgba(255,255,255,.08);--text:#e8ecf4;--text-dim:rgba(255,255,255,.5);--grad-start:#0068FF;--grad-end:#85D9FE;--green:#34d399;--yellow:#fbbf24;--red:#f87171;--glass:rgba(255,255,255,.04)}
+:root{--bg:#060a14;--surface:#0d1220;--card:rgba(14,20,38,.85);--card-hover:rgba(20,28,50,.9);--border:rgba(255,255,255,.06);--border-active:rgba(0,104,255,.3);--text:#f0f2f8;--text-sec:#8b92a8;--text-dim:rgba(255,255,255,.35);--blue:#0068FF;--blue-light:#5ba3ff;--cyan:#85D9FE;--green:#34d399;--yellow:#fbbf24;--red:#f87171;--glow:0 0 30px rgba(0,104,255,.15)}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:16px 16px 80px}
-.container{max-width:480px;margin:0 auto}
-.header{text-align:center;padding:20px 0 16px}
-.header h1{font-size:28px;font-weight:800;background:linear-gradient(135deg,var(--grad-start),var(--grad-end));-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:1px}
-.header .ver{font-size:11px;color:var(--text-dim);margin-top:2px}
-.card{background:var(--card);border:1px solid var(--card-border);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-radius:20px;padding:20px;margin-bottom:14px;animation:fadeUp .5s ease both}
-.card:nth-child(2){animation-delay:.05s}.card:nth-child(3){animation-delay:.1s}.card:nth-child(4){animation-delay:.15s}.card:nth-child(5){animation-delay:.2s}.card:nth-child(6){animation-delay:.25s}
-@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
-h3{font-size:13px;font-weight:700;color:var(--text-dim);letter-spacing:.8px;text-transform:uppercase;margin-bottom:14px}
-.hero{background:linear-gradient(135deg,var(--grad-start),var(--grad-end));border:none;color:#fff;text-align:center;padding:24px 20px;position:relative;overflow:hidden}
-.hero::after{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.08) 0%,transparent 70%);animation:shimmer 6s ease-in-out infinite}
-@keyframes shimmer{0%,100%{transform:translate(0,0)}50%{transform:translate(25%,25%)}}
-.hero .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;animation:pulse 2s ease-in-out infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.hero .active-name{font-size:20px;font-weight:800;display:block;margin:10px 0 4px;word-break:break-word}
-.hero .meta{font-size:12px;opacity:.8}
-.stats-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px}
-.stat-box{background:var(--card);border:1px solid var(--card-border);backdrop-filter:blur(20px);border-radius:16px;padding:14px 12px;text-align:center;animation:fadeUp .5s ease both}
-.stat-box .icon{font-size:20px;margin-bottom:6px}
-.stat-box .val{font-size:16px;font-weight:700;background:linear-gradient(135deg,var(--grad-start),var(--grad-end));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.stat-box .lbl{font-size:10px;color:var(--text-dim);margin-top:3px;text-transform:uppercase;letter-spacing:.5px}
-.list-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06)}
-.list-row:last-child{border-bottom:none}
-.item-name{font-weight:600;font-size:13px}.item-sub{font-size:11px;color:var(--text-dim);display:block;margin-top:2px}
-.btn{border:none;border-radius:12px;padding:8px 16px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;position:relative;overflow:hidden}
-.btn-primary{background:linear-gradient(135deg,var(--grad-start),var(--grad-end));color:#fff}
-.btn-outline{background:rgba(0,104,255,.12);color:var(--grad-start);border:1px solid rgba(0,104,255,.2)}
-.btn-active{background:linear-gradient(135deg,var(--green),#059669);color:#fff;cursor:default}
-.btn-danger{background:rgba(248,113,113,.12);color:var(--red);border:1px solid rgba(248,113,113,.2)}
-.btn:active{transform:scale(.95)}
-.btn-wide{width:100%;padding:14px;border-radius:14px;font-size:14px;margin-top:12px}
-.input-row{display:flex;gap:8px;margin-top:12px}
-input[type=text]{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:var(--text);padding:12px 14px;border-radius:12px;width:100%;font-size:13px;font-family:inherit;outline:none;transition:border .2s}
-input[type=text]:focus{border-color:var(--grad-start)}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100dvh;overflow-x:hidden}
+body::before{content:'';position:fixed;top:-200px;left:-100px;width:500px;height:500px;background:radial-gradient(circle,rgba(0,104,255,.08) 0%,transparent 70%);pointer-events:none;z-index:0}
+body::after{content:'';position:fixed;bottom:-200px;right:-100px;width:400px;height:400px;background:radial-gradient(circle,rgba(133,217,254,.06) 0%,transparent 70%);pointer-events:none;z-index:0}
+.app{position:relative;z-index:1;max-width:460px;margin:0 auto;padding:20px 16px 90px}
+.header{display:flex;align-items:center;justify-content:space-between;padding:8px 0 24px}
+.header .logo{display:flex;align-items:center;gap:10px}
+.header .logo-icon{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--blue),var(--cyan));display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:var(--glow)}
+.header h1{font-size:22px;font-weight:900;letter-spacing:.5px;background:linear-gradient(135deg,#fff,var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header .ver{font-size:10px;color:var(--text-dim);background:rgba(255,255,255,.06);padding:4px 10px;border-radius:20px;font-weight:600;letter-spacing:.5px}
+.hero{background:linear-gradient(145deg,rgba(0,104,255,.2),rgba(133,217,254,.08));border:1px solid rgba(0,104,255,.2);border-radius:24px;padding:28px 24px 20px;margin-bottom:16px;position:relative;overflow:hidden;animation:fadeIn .6s ease}
+.hero::before{content:'';position:absolute;top:0;right:0;width:180px;height:180px;background:radial-gradient(circle,rgba(0,104,255,.15) 0%,transparent 70%);pointer-events:none}
+.hero-status{display:flex;align-items:center;gap:8px;margin-bottom:16px}
+.hero-status .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.hero-status .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+.hero-status .dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
+.hero-status .dot{animation:blink 2.5s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.hero-status span{font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-sec)}
+.hero .name{font-size:22px;font-weight:800;line-height:1.2;margin-bottom:6px;word-break:break-word}
+.hero .updated{font-size:12px;color:var(--text-sec)}
+.hero-actions{display:flex;gap:10px;margin-top:18px}
+.btn-hero{flex:1;padding:13px;border-radius:14px;font-size:13px;font-weight:700;border:none;cursor:pointer;transition:all .2s;font-family:inherit}
+.btn-hero:active{transform:scale(.96)}
+.btn-hero.primary{background:linear-gradient(135deg,var(--blue),var(--blue-light));color:#fff;box-shadow:0 4px 20px rgba(0,104,255,.3)}
+.hero .timer{text-align:center;font-size:11px;color:var(--text-dim);margin-top:12px;letter-spacing:.3px}
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.bento{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px}
+.bento-item{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:16px 12px;text-align:center;transition:border-color .3s,transform .2s;animation:fadeIn .5s ease both}
+.bento-item:nth-child(1){animation-delay:.05s}.bento-item:nth-child(2){animation-delay:.1s}.bento-item:nth-child(3){animation-delay:.15s}
+.bento-item:hover{border-color:var(--border-active);transform:translateY(-2px)}
+.bento-item .b-icon{font-size:18px;margin-bottom:8px;opacity:.9}
+.bento-item .b-val{font-size:18px;font-weight:800;color:#fff}
+.bento-item .b-lbl{font-size:9px;color:var(--text-sec);margin-top:5px;text-transform:uppercase;letter-spacing:.8px;font-weight:600}
+.section{background:var(--card);border:1px solid var(--border);border-radius:22px;padding:22px;margin-bottom:14px;animation:fadeIn .5s ease both}
+.section-title{display:flex;align-items:center;gap:8px;margin-bottom:16px}
+.section-title .s-icon{width:32px;height:32px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
+.section-title h3{font-size:14px;font-weight:700;color:var(--text);letter-spacing:.3px;text-transform:none;margin:0}
+.section-title .s-count{margin-left:auto;font-size:11px;color:var(--text-dim);background:rgba(255,255,255,.06);padding:3px 10px;border-radius:20px;font-weight:600}
+.s-blue{background:rgba(0,104,255,.15)}.s-green{background:rgba(52,211,153,.15)}.s-purple{background:rgba(168,85,247,.15)}.s-orange{background:rgba(251,146,60,.15)}
+.list-item{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);transition:background .2s}
+.list-item:last-child{border-bottom:none}
+.list-item:hover{background:rgba(255,255,255,.02);margin:0 -10px;padding:12px 10px;border-radius:12px}
+.li-info{flex:1;min-width:0}
+.li-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.li-sub{font-size:11px;color:var(--text-sec);margin-top:2px}
+.li-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
+.btn{border:none;border-radius:10px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;font-family:inherit}
+.btn:active{transform:scale(.93)}
+.btn-sm{padding:6px 12px;font-size:11px;border-radius:8px}
+.btn-primary{background:linear-gradient(135deg,var(--blue),var(--blue-light));color:#fff}
+.btn-ghost{background:rgba(0,104,255,.1);color:var(--blue-light);border:1px solid rgba(0,104,255,.15)}
+.btn-active{background:rgba(52,211,153,.15);color:var(--green);border:1px solid rgba(52,211,153,.2);cursor:default}
+.btn-danger{background:rgba(248,113,113,.1);color:var(--red);border:1px solid rgba(248,113,113,.15)}
+.ping-badge{font-size:10px;font-weight:700;padding:4px 8px;border-radius:6px;min-width:46px;text-align:center;letter-spacing:.3px}
+.ping-good{background:rgba(52,211,153,.12);color:var(--green)}.ping-mid{background:rgba(251,191,36,.12);color:var(--yellow)}.ping-bad{background:rgba(248,113,113,.12);color:var(--red)}.ping-wait{background:rgba(255,255,255,.04);color:var(--text-dim)}
+.input-row{display:flex;gap:8px;margin-top:14px}
+input[type=text]{background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--text);padding:12px 14px;border-radius:12px;width:100%;font-size:13px;font-family:inherit;outline:none;transition:all .2s}
+input[type=text]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(0,104,255,.1)}
 input[type=text]::placeholder{color:var(--text-dim)}
-.ping-badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;min-width:52px;text-align:center}
-.ping-good{background:rgba(52,211,153,.15);color:var(--green)}.ping-mid{background:rgba(251,191,36,.15);color:var(--yellow)}.ping-bad{background:rgba(248,113,113,.15);color:var(--red)}.ping-wait{background:rgba(255,255,255,.06);color:var(--text-dim)}
 .hwid-card{display:flex;align-items:center;gap:14px}
-.hwid-icon{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--grad-start),var(--grad-end));display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
-.hwid-info .hwid-val{font-size:12px;font-weight:600;font-family:'Courier New',monospace;color:var(--grad-end);word-break:break-all}
-.hwid-info .hwid-meta{font-size:11px;color:var(--text-dim);margin-top:3px}
-.toast{position:fixed;left:12px;right:12px;bottom:20px;padding:14px 16px;border-radius:14px;background:rgba(20,20,30,.95);border:1px solid rgba(255,255,255,.1);backdrop-filter:blur(20px);color:#fff;z-index:10000;font-size:13px;transform:translateY(100px);opacity:0;transition:all .35s cubic-bezier(.4,0,.2,1);max-width:480px;margin:0 auto}
+.hwid-icon{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--blue),var(--cyan));display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;box-shadow:var(--glow)}
+.hwid-info .hwid-val{font-size:11px;font-weight:600;font-family:'Courier New',monospace;color:var(--cyan);word-break:break-all;letter-spacing:.5px}
+.hwid-info .hwid-meta{font-size:11px;color:var(--text-sec);margin-top:4px}
+.toast{position:fixed;left:16px;right:16px;bottom:24px;padding:14px 18px;border-radius:16px;background:var(--surface);border:1px solid var(--border);backdrop-filter:blur(20px);color:#fff;z-index:10000;font-size:13px;font-weight:500;transform:translateY(120px);opacity:0;transition:all .4s cubic-bezier(.4,0,.2,1);max-width:460px;margin:0 auto;box-shadow:0 10px 40px rgba(0,0,0,.5)}
 .toast.show{transform:translateY(0);opacity:1}
-.loader{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);z-index:9999;display:none;justify-content:center;align-items:center}
+.loader{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(6,10,20,.85);backdrop-filter:blur(8px);z-index:9999;display:none;justify-content:center;align-items:center}
 .loader.show{display:flex}
-.spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,.1);border-top:3px solid var(--grad-end);border-radius:50%;animation:spin .8s linear infinite}
+.spinner{width:36px;height:36px;border:3px solid rgba(255,255,255,.08);border-top:3px solid var(--cyan);border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.skeleton{background:linear-gradient(90deg,rgba(255,255,255,.04) 25%,rgba(255,255,255,.08) 50%,rgba(255,255,255,.04) 75%);background-size:200% 100%;animation:skel 1.5s ease-in-out infinite;border-radius:8px;height:16px;margin:4px 0}
+.skeleton{background:linear-gradient(90deg,rgba(255,255,255,.03) 25%,rgba(255,255,255,.06) 50%,rgba(255,255,255,.03) 75%);background-size:200% 100%;animation:skel 1.5s ease-in-out infinite;border-radius:8px;height:16px;margin:4px 0}
 @keyframes skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
-.footer{text-align:center;font-size:11px;color:var(--text-dim);padding:8px 0}
-.footer button{background:rgba(0,104,255,.1);border:1px solid rgba(0,104,255,.2);color:var(--grad-start);padding:6px 14px;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer;margin-left:8px;font-family:inherit}
-.refresh-timer{font-size:11px;color:var(--text-dim);text-align:center;margin-top:8px}
-@media(max-width:360px){.stats-row{grid-template-columns:1fr 1fr}.stat-box:nth-child(3){grid-column:span 2}}
+.footer{text-align:center;padding:12px 0}
+.footer span{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
+.footer button{background:rgba(0,104,255,.08);border:1px solid rgba(0,104,255,.15);color:var(--blue-light);padding:6px 14px;border-radius:10px;font-size:10px;font-weight:700;cursor:pointer;margin-left:6px;font-family:inherit;transition:all .2s}
+.footer button:hover{background:rgba(0,104,255,.15)}
+@media(max-width:360px){.bento{grid-template-columns:1fr 1fr}.bento-item:nth-child(3){grid-column:span 2}}
   </style>
 </head>
 <body>
   <div id="loader" class="loader"><div class="spinner"></div></div>
   <div id="toast" class="toast"></div>
-  <div class="container">
-    <header class="header"><h1>⚡ RIFT</h1><div class="ver" id="ver_label">v...</div></header>
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">⚡</div>
+        <h1>RIFT</h1>
+      </div>
+      <span class="ver" id="ver_label">v...</span>
+    </header>
 
-    <div class="card hero" id="hero_card">
-      <h3><span class="status-dot" id="status_dot" style="background:var(--red)"></span>ПОДКЛЮЧЕНИЕ</h3>
-      <span class="active-name" id="active_name"><div class="skeleton" style="width:60%;margin:0 auto;height:22px"></div></span>
-      <span class="meta" id="sub_meta">Загрузка...</span>
-      <button class="btn btn-wide" style="background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2)" onclick="updateSubs()">🔄 Обновить подписку</button>
-      <div class="refresh-timer" id="refresh_timer"></div>
+    <div class="hero" id="hero_card">
+      <div class="hero-status"><div class="dot off" id="status_dot"></div><span>Подключение</span></div>
+      <div class="name" id="active_name"><div class="skeleton" style="width:65%;height:24px"></div></div>
+      <div class="updated" id="sub_meta">Загрузка...</div>
+      <div class="hero-actions">
+        <button class="btn-hero primary" onclick="updateSubs()">🔄 Обновить подписку</button>
+      </div>
+      <div class="timer" id="refresh_timer"></div>
     </div>
 
-    <div class="stats-row">
-      <div class="stat-box"><div class="icon">📊</div><div class="val" id="st_traffic">—</div><div class="lbl">Трафик</div></div>
-      <div class="stat-box"><div class="icon">⏱</div><div class="val" id="st_uptime">—</div><div class="lbl">Аптайм</div></div>
-      <div class="stat-box"><div class="icon">💾</div><div class="val" id="st_mem">—</div><div class="lbl">RAM</div></div>
+    <div class="bento">
+      <div class="bento-item"><div class="b-icon">📊</div><div class="b-val" id="st_traffic">—</div><div class="b-lbl">Трафик</div></div>
+      <div class="bento-item"><div class="b-icon">📅</div><div class="b-val" id="st_expire">—</div><div class="b-lbl">Подписка</div></div>
+      <div class="bento-item"><div class="b-icon">💾</div><div class="b-val" id="st_mem">—</div><div class="b-lbl">RAM</div></div>
     </div>
 
-    <div class="card">
-      <h3>🖥 Устройство</h3>
+    <div class="section" style="animation-delay:.1s">
+      <div class="section-title"><div class="s-icon s-blue">🔑</div><h3>Устройство</h3></div>
       <div class="hwid-card">
-        <div class="hwid-icon">🔑</div>
+        <div class="hwid-icon">�</div>
         <div class="hwid-info">
           <div class="hwid-val" id="hwid_val">...</div>
           <div class="hwid-meta" id="hwid_meta">OpenWrt</div>
@@ -624,27 +718,27 @@ input[type=text]::placeholder{color:var(--text-dim)}
       </div>
     </div>
 
-    <div class="card">
-      <h3>🌐 Серверы</h3>
+    <div class="section" style="animation-delay:.15s">
+      <div class="section-title"><div class="s-icon s-green">🌐</div><h3>Серверы</h3><span class="s-count" id="nodes_count">0</span></div>
       <div id="nodes_list"><div class="skeleton"></div><div class="skeleton" style="width:80%"></div><div class="skeleton" style="width:60%"></div></div>
       <div class="input-row">
-        <input type="text" id="sub_url" placeholder="Ссылка на подписку">
+        <input type="text" id="sub_url" placeholder="Ссылка на подписку...">
         <button class="btn btn-primary" onclick="saveUrl()">💾</button>
       </div>
     </div>
 
-    <div class="card">
-      <h3>📡 VPN для устройства</h3>
-      <div class="input-row">
+    <div class="section" style="animation-delay:.2s">
+      <div class="section-title"><div class="s-icon s-purple">📡</div><h3>VPN для устройств</h3></div>
+      <div class="input-row" style="margin-top:0">
         <input type="text" id="manual_ip" placeholder="IP (192.168.1.X)">
         <button class="btn btn-primary" onclick="addManualIp()">+</button>
       </div>
       <div id="vpn_list" style="margin-top:10px"></div>
     </div>
 
-    <div class="card">
-      <h3>🎯 Домены (VPN)</h3>
-      <div class="input-row">
+    <div class="section" style="animation-delay:.25s">
+      <div class="section-title"><div class="s-icon s-orange">🎯</div><h3>Домены через VPN</h3></div>
+      <div class="input-row" style="margin-top:0">
         <input type="text" id="new_domain" placeholder="domain.com">
         <button class="btn btn-primary" onclick="addDomain()">+</button>
       </div>
@@ -656,8 +750,20 @@ input[type=text]::placeholder{color:var(--text-dim)}
 
 <script>
 function normalizeUrl(u){return(u||"").replace(/&sid=[a-zA-Z0-9]+/g,'');}
-let globalNodes=[],activeUrl="",vpnIps=[],domains=[];
+let globalNodes=[],activeUrl="",vpnIps=[],domains=[],subExpire=0,subExpireDays=0,subDownload=0,subTotal=0,subTitle='';
 let refreshInterval=600,refreshCountdown=refreshInterval;
+
+const FLAG_MAP={'🇦🇺':'AU','🇦🇹':'AT','🇧🇷':'BR','🇨🇦':'CA','🇨🇭':'CH','🇨🇳':'CN','🇩🇪':'DE','🇪🇸':'ES','🇫🇮':'FI','🇫🇷':'FR','🇬🇧':'GB','🇭🇰':'HK','🇭🇺':'HU','🇮🇱':'IL','🇮🇹':'IT','🇯🇵':'JP','🇰🇷':'KR','🇰🇿':'KZ','🇱🇹':'LT','🇲🇩':'MD','🇳🇱':'NL','🇵🇱':'PL','🇷🇺':'RU','🇹🇷':'TR','🇺🇦':'UA','🇺🇸':'US','🇩🇪':'DE','🇩🇰':'DK','🇸🇪':'SE','🇳🇴':'NO','🇮🇪':'IE','🇵🇹':'PT','🇬🇷':'GR','🇷🇴':'RO','🇧🇬':'BG','🇨🇿':'CZ','🇸🇰':'SK','🇸🇬':'SG','🇮🇳':'IN','🇦🇪':'AE','🇦🇷':'AR','🇲🇽':'MX','🇨🇱':'CL','🇨🇴':'CO','🇵🇪':'PE','🇹🇭':'TH','🇻🇳':'VN','🇮🇩':'ID','🇲🇾':'MY','🇵🇭':'PH','🇹🇼':'TW','🇿🇦':'ZA','🇪🇬':'EG','🇳🇬':'NG','🇰🇪':'KE'};
+function fixFlags(name){
+  return name.replace(/[\uD83C][\uDDE6-\uDDFF][\uD83C][\uDDE6-\uDDFF]/g,function(flag){
+    const code=FLAG_MAP[flag];
+    if(code)return'<span style="display:inline-block;background:rgba(255,255,255,.12);border-radius:4px;padding:1px 5px;font-size:10px;font-weight:800;letter-spacing:1px;vertical-align:middle;margin-right:2px">'+code+'</span>';
+    const cp=Array.from(flag);
+    const c1=String.fromCharCode(cp[0].codePointAt(0)-0x1F1E6+65);
+    const c2=String.fromCharCode(cp[1].codePointAt(0)-0x1F1E6+65);
+    return'<span style="display:inline-block;background:rgba(255,255,255,.12);border-radius:4px;padding:1px 5px;font-size:10px;font-weight:800;letter-spacing:1px;vertical-align:middle;margin-right:2px">'+c1+c2+'</span>';
+  });
+}
 
 function showToast(msg,ms=5000){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');clearTimeout(window.__t);window.__t=setTimeout(()=>el.classList.remove('show'),ms);}
 function showLoader(){document.getElementById('loader').classList.add('show');}
@@ -683,15 +789,16 @@ window.onload=async function(){
     const r=await api('get_panel_info');
     if(r.version){
       document.getElementById('ver_label').textContent='v'+r.version;
-      document.getElementById('footer').innerHTML='Версия: '+r.version+' <button onclick="checkForUpdates()">🔄 Проверить</button>';
+      document.getElementById('footer').innerHTML='<span>Версия '+r.version+'</span><button onclick="checkForUpdates()">🔄 Обновить</button>';
     }
   }catch(e){}
   await loadData();
   await loadNetwork();
   await loadHWID();
   await loadStats();
+  pingAll();
   setInterval(loadStats,15000);
-  setInterval(()=>{refreshCountdown--;if(refreshCountdown<=0){refreshCountdown=refreshInterval;silentRefresh();}updateTimer();},1000);
+  setInterval(()=>{refreshCountdown--;if(refreshCountdown<=0){refreshCountdown=refreshInterval;silentRefresh();setTimeout(pingAll,3000);}updateTimer();updateExpireWidget();},1000);
   updateTimer();
 };
 
@@ -704,11 +811,34 @@ async function silentRefresh(){
   try{await api('update_subs',{});await loadData();}catch(e){}
 }
 
+function updateExpireWidget(){
+  const el=document.getElementById('st_expire');
+  if(subExpireDays>0){
+    const d=Math.floor(subExpireDays),h=Math.round((subExpireDays-d)*24);
+    el.textContent=d>0?(d+'д'+(h>0?' '+h+'ч':'')):(h+'ч');
+    if(d<=3)el.style.cssText='color:var(--red)';
+    else if(d<=7)el.style.cssText='color:var(--yellow)';
+    else el.style.cssText='';
+    return;
+  }
+  if(subExpire>0){
+    const now=Math.floor(Date.now()/1000);
+    const diff=subExpire-now;
+    if(diff<=0){el.textContent='Истекла';el.style.cssText='color:var(--red)';return;}
+    const d=Math.floor(diff/86400);
+    if(d>30){el.textContent=Math.floor(d/30)+'мес';}
+    else if(d>0){el.textContent=d+'д';}
+    else{const h=Math.floor(diff/3600);el.textContent=h+'ч';}
+    return;
+  }
+  el.textContent='∞';
+}
+
 async function loadStats(){
   try{
     const t=await api('get_traffic');
-    document.getElementById('st_traffic').textContent=fmtBytes(t.bytes||0);
-    document.getElementById('st_uptime').textContent=fmtUptime(t.uptime||0);
+    const bytes=subDownload>0?subDownload:(t.bytes||0);
+    document.getElementById('st_traffic').textContent=fmtBytes(bytes);
   }catch(e){}
   try{
     const s=await api('get_system');
@@ -730,6 +860,11 @@ async function loadData(){
     const d=await api('get_nodes');
     globalNodes=Array.isArray(d.nodes)?d.nodes:[];
     activeUrl=d.active_url||"";
+    if(d.expire_ts)subExpire=d.expire_ts;
+    if(d.expire_days)subExpireDays=d.expire_days;
+    if(d.sub_download)subDownload=d.sub_download;
+    if(d.sub_total)subTotal=d.sub_total;
+    if(d.sub_title)subTitle=d.sub_title;
     document.getElementById('sub_meta').innerText=d.updated?("Обновлено: "+d.updated):"Нет данных";
     let an="Нет подключения";
     const dot=document.getElementById('status_dot');
@@ -737,26 +872,29 @@ async function loadData(){
       const norm=normalizeUrl(activeUrl.trim());
       const n=globalNodes.find(x=>normalizeUrl((x.full_url||"").trim())===norm);
       if(n)an=n.name;else{const m=activeUrl.match(/#(.*)$/);if(m)an=decodeURIComponent(m[1]);}
-      dot.style.background='var(--green)';
-    }else{dot.style.background='var(--red)';}
+      dot.className='dot on';
+    }else{dot.className='dot off';}
     document.getElementById('active_name').innerText=an;
     renderNodes();
+    updateExpireWidget();
   }catch(e){showToast("Ошибка: "+e.message);}
 }
 
 function renderNodes(){
   const div=document.getElementById("nodes_list");
+  const cnt=document.getElementById('nodes_count');
+  if(cnt)cnt.textContent=globalNodes.length;
   if(!globalNodes.length){div.innerHTML='<div style="padding:14px 0;text-align:center;color:var(--text-dim)">Список пуст</div>';return;}
   const normActive=normalizeUrl((activeUrl||"").trim());
   let h="";
   globalNodes.forEach((n,i)=>{
     const isA=normalizeUrl((n.full_url||"").trim())===normActive;
-    const btn=isA?'<span class="btn btn-active">✓ Активен</span>'
-      :'<button class="btn btn-outline" onclick="connect('+i+')">▶</button>';
+    const btn=isA?'<span class="btn btn-active btn-sm">✓</span>'
+      :'<button class="btn btn-ghost btn-sm" onclick="connect('+i+')">▶</button>';
     const pingId='ping_'+i;
-    h+='<div class="list-row"><div style="flex:1;min-width:0"><span class="item-name" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+
-      (n.name||"Server")+'</span><span class="item-sub">'+(n.type||'')+' • '+(n.host||'')+'</span></div>'+
-      '<div style="display:flex;gap:6px;align-items:center;flex-shrink:0"><span class="ping-badge ping-wait" id="'+pingId+'" onclick="doPing(\''+n.host+'\',\''+pingId+'\')">ping</span>'+btn+'</div></div>';
+    h+='<div class="list-item"><div class="li-info"><span class="li-name">'+
+      fixFlags(n.name||"Server")+'</span><span class="li-sub">'+(n.type||'')+' • '+(n.host||'')+'</span></div>'+
+      '<div class="li-actions"><span class="ping-badge ping-wait" id="'+pingId+'">...</span>'+btn+'</div></div>';
   });
   div.innerHTML=h;
 }
@@ -772,6 +910,14 @@ async function doPing(host,elId){
       el.className='ping-badge '+(ms<100?'ping-good':ms<300?'ping-mid':'ping-bad');
     }else{el.textContent='✗';el.className='ping-badge ping-bad';}
   }catch(e){el.textContent='✗';el.className='ping-badge ping-bad';}
+}
+
+async function pingAll(){
+  for(let i=0;i<globalNodes.length;i++){
+    const n=globalNodes[i];
+    doPing(n.host,'ping_'+i);
+    if(i%3===2)await new Promise(r=>setTimeout(r,500));
+  }
 }
 
 async function updateSubs(){
@@ -804,14 +950,14 @@ async function loadNetwork(){
     let vh="";
     c.forEach(x=>{
       const iv=vpnIps.includes(x.ip);
-      const btn=iv?'<button class="btn btn-active" onclick="toggleVpn(\''+x.ip+'\',\'del\')">✓ Вкл</button>'
-        :'<button class="btn btn-outline" onclick="toggleVpn(\''+x.ip+'\',\'add\')">Включить</button>';
-      vh+='<div class="list-row"><div><span class="item-name">'+x.name+'</span><span class="item-sub">'+x.ip+'</span></div>'+btn+'</div>';
+      const btn=iv?'<button class="btn btn-active btn-sm" onclick="toggleVpn(\''+x.ip+'\',\'del\')">✓</button>'
+        :'<button class="btn btn-ghost btn-sm" onclick="toggleVpn(\''+x.ip+'\',\'add\')">+</button>';
+      vh+='<div class="list-item"><div class="li-info"><span class="li-name">'+x.name+'</span><span class="li-sub">'+x.ip+'</span></div><div class="li-actions">'+btn+'</div></div>';
     });
     if(!vh)vh='<div style="padding:12px 0;text-align:center;color:var(--text-dim)">Нет устройств</div>';
     document.getElementById("vpn_list").innerHTML=vh;
     let dh="";
-    if(domains.length){domains.forEach(dom=>{dh+='<div class="list-row"><div><span class="item-name">'+dom+'</span></div><button class="btn btn-danger" onclick="manageDomain(\''+dom+'\',\'del\')">✕</button></div>';});}
+    if(domains.length){domains.forEach(dom=>{dh+='<div class="list-item"><div class="li-info"><span class="li-name">'+dom+'</span></div><div class="li-actions"><button class="btn btn-danger btn-sm" onclick="manageDomain(\''+dom+'\',\'del\')">✕</button></div></div>';});}
     else{dh='<div style="padding:12px 0;text-align:center;color:var(--text-dim)">Список пуст</div>';}
     document.getElementById('domains_list').innerHTML=dh;
   }catch(e){showToast("❌ "+e.message);}
@@ -938,8 +1084,13 @@ add_links(raw)
 if #nodes==0 then
   local t=raw:gsub("%s+","")
   if #t>=16 and t:match("^[%w%+/%=_%-%s]+$") then
-    local dec=exec_read("printf %s "..shq(b64fix(t)).." | base64 -d 2>/dev/null")
-    if dec~="" then add_links(dec) end
+    local fixed=b64fix(t)
+    local fb=io.open("/tmp/rift_b64.tmp","w")
+    if fb then fb:write(fixed) fb:close() end
+    os.execute("base64 -d /tmp/rift_b64.tmp > /tmp/rift_dec.tmp 2>/dev/null")
+    local fd=io.open("/tmp/rift_dec.tmp","r")
+    if fd then local dec=fd:read("*a") fd:close() if dec and #dec>0 then add_links(dec) end end
+    os.execute("rm -f /tmp/rift_b64.tmp /tmp/rift_dec.tmp")
   end
 end
 if #nodes>0 then
