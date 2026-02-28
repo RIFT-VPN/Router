@@ -1,8 +1,8 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.7) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.8) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.7"
+PANEL_VERSION="3.8"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 # === MENU: detect existing installation ===
@@ -830,10 +830,8 @@ cat <<'EOF' > /www/podkop_panel/index.html
     </div>
   </div>
   <div class="container">
-    <header class="header">
+    <header class="header" style="padding:12px 0 8px">
       <img class="logo-img" src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTczIiBoZWlnaHQ9IjE3MyIgdmlld0JveD0iMCAwIDE3MyAxNzMiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIxNzMiIGhlaWdodD0iMTczIiByeD0iMjUiIGZpbGw9InVybCgjcGFpbnQwX2xpbmVhcl82OV8yKSIvPgo8cGF0aCBkPSJNNzkuMTQxNiA1Ni40MTAyQzgzLjU3MTEgNTUuNzE0MyA4OC4xMDc3IDU2LjMxMDggOTIuMjA3IDU4LjEyNzlDOTguNzM4NyA2MS4wMjM0IDEwMy41ODIgNjYuNzU0OSAxMDUuMzQ5IDczLjY3NzdMMTEzLjE3NyAxMDQuMzU5TDExMy4yNTggMTA0LjcyOUMxMTQuMDQ4IDEwOC4zMjkgMTExLjYyNSAxMTEuODQ3IDEwNy45NzkgMTEyLjM5MUwxMDcuNjI0IDExMi40NDNDMTA1LjkzNCAxMTIuNjk1IDEwNC4yMjIgMTEyLjE2NSAxMDIuOTcgMTExLjAwM0wxMDIuNDg0IDExMC41NTJDMTAxLjc1NiAxMDkuODc2IDEwMC43OTkgMTA5LjUgOTkuODA1NyAxMDkuNUM5OC4yMDIxIDEwOS41IDk2Ljc1OSAxMTAuNDc0IDk2LjE1NzIgMTExLjk2TDk1LjMwODYgMTE0LjA1NkM5NC42MjA2IDExNS43NTUgOTMuMzE4MiAxMTcuMTMyIDkxLjY2MDIgMTE3LjkxNEw5MC43NTc4IDExOC4zMzlDODkuMTEyMSAxMTkuMTE1IDg3LjI4MzggMTE5LjQxOSA4NS40NzU2IDExOS4yMTlMODMuMTk2MyAxMTguOTY1QzgxLjQ5NDggMTE4Ljc3NiA3OS45NDcgMTE3Ljg5MSA3OC45MjE5IDExNi41Mkw3Ni41OTM4IDExMy40MDZDNzUuMDc1NyAxMTEuMzc2IDcxLjk4NSAxMTEuNTI5IDcwLjY3NDggMTEzLjY5OUw3MC4zMjMyIDExNC4xNzJDNjguNzMzOSAxMTYuMzA2IDY1Ljk3ODQgMTE3LjIxOCA2My40Mjk3IDExNi40NTNMNjMuMjEzOSAxMTYuMzg4QzYwLjc1NjUgMTE1LjY1MSA1OS4wMzgxIDExMy40MzUgNTguOTM1NSAxMTAuODcxTDU5Ljc2OTUgOTUuNjQ0NUM1OS44OTg2IDkzLjI4ODYgNTkuODUxNyA5MC45MjYyIDU5LjYyOTkgODguNTc3MUw1OC45MDE0IDgwLjg1OTRDNTguNjQwNiA3OC4wOTc5IDU4Ljg5NTQgNzUuMzEyMSA1OS42NTIzIDcyLjY0MzZDNjIuMDM2MiA2NC4yMzk5IDY5LjA4OTQgNTcuOTg5NCA3Ny43MTg4IDU2LjYzMzhMNzkuMTQxNiA1Ni40MTAyWk02OC45NjE5IDc1LjA1MjdDNjYuNDUzNyA3NS4wNTI3IDY0LjQxOTkgNzcuODkyNSA2NC40MTk5IDgxLjM5NDVDNjQuNDIwMSA4NC44OTY0IDY2LjQ1MzggODcuNzM1NCA2OC45NjE5IDg3LjczNTRDNzEuNDY5OSA4Ny43MzUxIDczLjUwMjggODQuODk2MiA3My41MDI5IDgxLjM5NDVDNzMuNTAyOSA3Ny44OTI3IDcxLjQ3IDc1LjA1MyA2OC45NjE5IDc1LjA1MjdaTTgyLjE1NzIgNzUuMDUyN0M3OS42NDkxIDc1LjA1MjcgNzcuNjE1NCA3Ny44OTE3IDc3LjYxNTIgODEuMzkzNkM3Ny42MTUyIDg0Ljg5NTYgNzkuNjQ5IDg3LjczNTQgODIuMTU3MiA4Ny43MzU0Qzg0LjY2NTQgODcuNzM1MiA4Ni42OTgyIDg0Ljg5NTUgODYuNjk4MiA4MS4zOTM2Qzg2LjY5ODEgNzcuODkxOCA4NC42NjUzIDc1LjA1MjkgODIuMTU3MiA3NS4wNTI3WiIgZmlsbD0id2hpdGUiLz4KPGRlZnM+CjxsaW5lYXJHcmFkaWVudCBpZD0icGFpbnQwX2xpbmVhcl82OV8yIiB4MT0iMTUxLjk3IiB5MT0iNS40OTc2MiIgeDI9IjIuMjg1NjgiIHkyPSIxOTMuODc1IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+CjxzdG9wIG9mZnNldD0iMC4zMDA5MzEiIHN0b3AtY29sb3I9IiMwMDY4RkYiLz4KPHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjODVEOUZFIi8+CjwvbGluZWFyR3JhZGllbnQ+CjwvZGVmcz4KPC9zdmc+Cg==" alt="RIFT">
-      <h1>RIFT</h1>
-      <div class="version" id="ver_line">...</div>
     </header>
     <div class="card active-card">
       <h3>АКТИВНОЕ ПОДКЛЮЧЕНИЕ</h3>
@@ -898,7 +896,6 @@ cat <<'EOF' > /www/podkop_panel/index.html
   }
   window.onload=async function(){
     try{const r=await api('get_sub_url');if(r.url)document.getElementById('sub_url').value=r.url;}catch(e){}
-    try{const r=await api('get_panel_info');if(r.version)document.getElementById('ver_line').textContent='v'+r.version+' • '+(r.device_model||'');}catch(e){}
     try{const r=await api('get_hwid_info');document.getElementById('hwid_info').innerHTML='<b>HWID:</b> '+(r.hwid||'?')+'<br><b>OS:</b> '+(r.os_type||'')+' '+(r.os_version||'')+'<br><b>Модель:</b> '+(r.device_model||'?');}catch(e){}
     await loadData();await loadNetwork();
   };
