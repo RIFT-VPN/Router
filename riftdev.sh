@@ -760,7 +760,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:14px;box-shadow:var(--shadow)}
     h3{margin:0 0 14px;font-weight:700;font-size:14px;color:var(--text-sec);text-transform:uppercase;letter-spacing:.8px}
     .active-card{background:linear-gradient(135deg,#0066FF 0%,#00D4FF 100%);border:none;text-align:center;color:#fff;position:relative;overflow:hidden}
-    .active-card::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.06) 0%,transparent 70%);animation:pulse 4s ease-in-out infinite}
+    .active-card::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.06) 0%,transparent 70%);animation:pulse 4s ease-in-out infinite;pointer-events:none}
     @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
     .active-card h3{color:rgba(255,255,255,.7)}
     .server-big{font-size:18px;font-weight:800;margin:8px 0 4px;display:block;word-break:break-word}
