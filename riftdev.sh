@@ -1,8 +1,8 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.1) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.3) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.2"
+PANEL_VERSION="3.3"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 # === MENU: detect existing installation ===
@@ -438,10 +438,15 @@ end
 local function should_skip(name)
   if not name then return false end
   local lower = name:lower()
-  -- Filter phone-only entries
+  -- Filter phone-only and unsupported transport entries
   if lower:find("обход бс") or lower:find("обход%s+бс") then return true end
   if name:match("📱") then return true end
   return false
+end
+
+local function is_xhttp(transport)
+  local t = (transport or ""):lower()
+  return t == "xhttp" or t == "splithttp"
 end
 
 local function get_url_key(url)
@@ -456,7 +461,7 @@ local function parse_nodes(text)
   for _,u in ipairs(links) do
     local node = link_to_node(u)
     local key = get_url_key(u)
-    if not seen[key] and not should_skip(node.name) then
+    if not seen[key] and not should_skip(node.name) and not is_xhttp(node.transport) then
       seen[key] = true
       nodes[#nodes+1] = node
     end
@@ -555,17 +560,24 @@ if method=="update_subs" then
   exec_silent("uci commit podkop_subs")
 
   local body="/tmp/podkop_sub.body"
-  local hdr_file="/tmp/podkop_sub.hdr"
-  local ok = smart_fetch_with_headers(url, body, hdr_file)
+  local err="/tmp/podkop_sub.err"
+  local ok = smart_fetch(url, body, err)
   local raw = exec_read("cat "..body.." 2>/dev/null")
 
   if (not ok) or raw=="" then
     print(to_json({status="error", msg="Ошибка загрузки подписки"}))
-    os.remove(body); os.remove(hdr_file); os.exit(0)
+    os.remove(body); os.remove(err); os.exit(0)
   end
 
-  -- Extract subscription info from headers
-  local sub_info = extract_sub_info(hdr_file)
+  -- Try to capture headers separately (optional, may fail on BusyBox)
+  local hdr_file="/tmp/podkop_sub.hdr"
+  local sub_info = {expire="", title="", interval=""}
+  exec_silent("wget -q -S -T 10 -O /dev/null "..shq(url).." 2>"..hdr_file)
+  local hdr_raw = exec_read("cat "..hdr_file.." 2>/dev/null")
+  if hdr_raw ~= "" then
+    sub_info = extract_sub_info(hdr_file)
+  end
+  os.remove(hdr_file)
 
   -- try raw first, then base64
   local nodes = parse_nodes(raw)
@@ -601,7 +613,7 @@ if method=="update_subs" then
   else
     print('{"status":"error","msg":"Ошибка записи"}')
   end
-  os.remove(body); os.remove(hdr_file); os.exit(0)
+  os.remove(body); os.remove(err); os.exit(0)
 end
 
 if method=="apply" then
@@ -995,8 +1007,9 @@ for line in text:gmatch('[^\n\r]+') do
       local ne=line:match('#(.+)$')
       local name='Server'
       if ne then name=ne:gsub('%%(%x%x)',function(h)return string.char(tonumber(h,16))end) end
-      -- skip phone-only entries
-      if not name:lower():find('обход бс') and not name:find('📱') then
+      -- skip phone-only and xhttp entries
+      local _transport = line:match('[?&]type=([^&#]*)') or 'tcp'
+      if not name:lower():find('обход бс') and not name:find('📱') and _transport ~= 'xhttp' and _transport ~= 'splithttp' then
         local host=line:match('@(.-)[:?]') or line:match('://([^/:#?]+)') or 'unknown'
         local transport=line:match('[?&]type=([^&#]*)') or 'tcp'
         local security=line:match('[?&]security=([^&#]*)') or ''
