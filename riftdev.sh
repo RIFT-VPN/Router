@@ -1,8 +1,8 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.5) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.6) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.5"
+PANEL_VERSION="3.6"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 # === MENU: detect existing installation ===
@@ -750,18 +750,19 @@ cat <<'EOF' > /www/podkop_panel/index.html
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>RIFT Panel</title>
   <style>
-    :root{--bg:#0F1923;--card:#1A2735;--text:#E8EDF2;--text-sec:#7B8D9E;--accent:#00D4FF;--grad1:#00D4FF;--grad2:#0066FF;--green:#00E676;--red:#FF5252;--orange:#FFB74D;--border:rgba(0,212,255,.12);--shadow:0 4px 24px rgba(0,0,0,.4)}
+    :root{--bg:#0A0E1A;--card:#111827;--text:#E8EDF2;--text-sec:#7B8D9E;--accent:#85D9FE;--grad1:#0068FF;--grad2:#85D9FE;--green:#00E676;--red:#FF5252;--orange:#FFB74D;--border:rgba(0,104,255,.15);--shadow:0 4px 24px rgba(0,0,0,.5)}
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
     .container{max-width:520px;margin:0 auto;padding:16px}
     .header{text-align:center;padding:20px 0 12px}
+    .logo-img{width:64px;height:64px;border-radius:14px;margin-bottom:8px}
     .header h1{font-size:28px;font-weight:800;background:linear-gradient(135deg,var(--grad1),var(--grad2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:1px}
     .header .version{font-size:11px;color:var(--text-sec);margin-top:4px}
     .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:14px;box-shadow:var(--shadow)}
     h3{margin:0 0 14px;font-weight:700;font-size:14px;color:var(--text-sec);text-transform:uppercase;letter-spacing:.8px}
-    .active-card{background:linear-gradient(135deg,#0066FF 0%,#00D4FF 100%);border:none;text-align:center;color:#fff;position:relative;overflow:hidden}
-    .active-card::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.06) 0%,transparent 70%);animation:pulse 4s ease-in-out infinite;pointer-events:none}
+    .active-card{background:linear-gradient(135deg,#0068FF 0%,#85D9FE 100%);border:none;text-align:center;color:#fff;position:relative;overflow:hidden}
+    .active-card::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.08) 0%,transparent 70%);animation:pulse 4s ease-in-out infinite;pointer-events:none}
     @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
     .active-card h3{color:rgba(255,255,255,.7)}
     .server-big{font-size:18px;font-weight:800;margin:8px 0 4px;display:block;word-break:break-word}
@@ -772,8 +773,8 @@ cat <<'EOF' > /www/podkop_panel/index.html
     .btn{border:none;border-radius:12px;font-weight:700;font-size:13px;cursor:pointer;transition:all .15s;outline:none}
     .btn-primary{background:linear-gradient(135deg,var(--grad1),var(--grad2));color:#fff;padding:10px 18px}
     .btn-primary:active{transform:scale(.97)}
-    .btn-outline{background:rgba(0,212,255,.08);border:1px solid rgba(0,212,255,.25);color:var(--accent);padding:8px 14px;font-size:12px}
-    .btn-outline:active{background:rgba(0,212,255,.15)}
+    .btn-outline{background:rgba(0,104,255,.08);border:1px solid rgba(0,104,255,.3);color:var(--accent);padding:8px 14px;font-size:12px}
+    .btn-outline:active{background:rgba(0,104,255,.18)}
     .btn-danger{background:rgba(255,82,82,.1);border:1px solid rgba(255,82,82,.25);color:var(--red);padding:6px 12px;font-size:11px}
     .btn-active{background:linear-gradient(135deg,var(--green),#00C853);color:#fff;padding:8px 14px;font-size:12px;border:none}
     .btn-full{width:100%;padding:12px;margin-top:12px;font-size:14px}
@@ -788,7 +789,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     .badge-xhttp{background:rgba(255,82,82,.12);color:var(--red);text-decoration:line-through}
     .badge-ws{background:rgba(156,39,176,.12);color:#CE93D8}
     .ping-text{font-size:10px;color:var(--text-sec);margin-top:1px;display:block}
-    .list-row.active-row{background:linear-gradient(135deg,rgba(0,102,255,.12),rgba(0,212,255,.08));border:1px solid rgba(0,212,255,.25);border-radius:12px;margin:4px -8px;padding:12px 8px}
+    .list-row.active-row{background:linear-gradient(135deg,rgba(0,104,255,.15),rgba(133,217,254,.08));border:1px solid rgba(0,104,255,.35);border-radius:12px;margin:4px -8px;padding:12px 8px}
     .ping-ok{color:var(--green)}
     .ping-bad{color:var(--red)}
     .sub-info{font-size:11px;color:rgba(255,255,255,.6);margin-top:4px;display:block}
@@ -796,9 +797,11 @@ cat <<'EOF' > /www/podkop_panel/index.html
     input[type=text]{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;width:100%;font-size:12px;font-family:inherit;outline:none}
     input[type=text]:focus{border-color:var(--accent)}
     input[type=text]::placeholder{color:var(--text-sec)}
-    .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);z-index:9999;display:none;justify-content:center;align-items:center}
-    .spinner{width:44px;height:44px;border:3px solid rgba(0,212,255,.15);border-top:3px solid var(--accent);border-radius:50%;animation:spin .8s linear infinite}
-    @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+    .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,14,26,.85);backdrop-filter:blur(8px);z-index:9999;display:none;flex-direction:column;justify-content:center;align-items:center}
+    .ghost-loader{width:55px;height:64px;animation:ghostFloat 2s ease-in-out infinite;filter:drop-shadow(0 0 20px rgba(0,104,255,.4))}
+    .ghost-loader img{width:100%;height:100%}
+    @keyframes ghostFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-16px)}}
+    .loader-text{color:var(--accent);font-size:12px;margin-top:16px;opacity:.7;letter-spacing:1px}
     .toast{display:none;position:fixed;left:12px;right:12px;bottom:12px;padding:12px 16px;border-radius:12px;background:var(--card);border:1px solid var(--border);color:var(--text);z-index:10000;font-size:12px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
     .logs-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.8);backdrop-filter:blur(8px);z-index:9998;overflow-y:auto}
     .logs-content{max-width:560px;margin:40px auto;padding:20px;background:var(--card);border-radius:16px;border:1px solid var(--border)}
@@ -811,7 +814,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
   </style>
 </head>
 <body>
-  <div id="preloader" class="preloader-overlay"><div class="spinner"></div></div>
+  <div id="preloader" class="preloader-overlay"><div class="ghost-loader"><img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTUiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA1NSA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTIwLjMzOTQgMC4yODI0MTNDMjQuNzY4OSAtMC40MTM0MTQgMjkuMzA1NSAwLjE4MzAzOSAzMy40MDQ4IDIuMDAwMTlDMzkuOTM2NSA0Ljg5NTY3IDQ0Ljc4MDEgMTAuNjI3MiA0Ni41NDY0IDE3LjU1TDU0LjM3NDUgNDguMjMxNkw1NC40NTU2IDQ4LjYwMDhDNTUuMjQ2MiA1Mi4yMDE1IDUyLjgyMjMgNTUuNzE5IDQ5LjE3NjMgNTYuMjYyOUw0OC44MjE4IDU2LjMxNTZDNDcuMTMyIDU2LjU2NzYgNDUuNDE5NCA1Ni4wMzc1IDQ0LjE2NzUgNTQuODc1Mkw0My42ODIyIDU0LjQyNEM0Mi45NTQyIDUzLjc0NzkgNDEuOTk2OSA1My4zNzIzIDQxLjAwMzQgNTMuMzcyM0MzOS4zOTk5IDUzLjM3MjMgMzcuOTU2NyA1NC4zNDU4IDM3LjM1NSA1NS44MzIyTDM2LjUwNjQgNTcuOTI3OUMzNS44MTgzIDU5LjYyNyAzNC41MTU5IDYxLjAwNDYgMzIuODU3OSA2MS43ODYzTDMxLjk1NTYgNjIuMjExMUMzMC4zMDk4IDYyLjk4NyAyOC40ODE2IDYzLjI5MTcgMjYuNjczNCA2My4wOTFMMjQuMzk0MSA2Mi44MzcxQzIyLjY5MjYgNjIuNjQ4MiAyMS4xNDQ3IDYxLjc2MjggMjAuMTE5NyA2MC4zOTE4TDE3Ljc5MTUgNTcuMjc4NUMxNi4yNzM1IDU1LjI0ODMgMTMuMTgyOCA1NS40MDEzIDExLjg3MjYgNTcuNTcxNUwxMS41MjEgNTguMDQ0MUM5LjkzMTY4IDYwLjE3ODIgNy4xNzYxNCA2MS4wOTAxIDQuNjI3NDYgNjAuMzI1NEw0LjQxMTY0IDYwLjI2QzEuOTU0MjQgNTkuNTIyOCAwLjIzNTg4IDU3LjMwNjkgMC4xMzMzMjMgNTQuNzQzNEwwLjk2NzMwNyAzOS41MTY4QzEuMDk2NCAzNy4xNjA5IDEuMDQ5NDkgMzQuNzk4NCAwLjgyNzY1OSAzMi40NDk0TDAuMDk5MTQyOSAyNC43MzE2Qy0wLjE2MTY1IDIxLjk3MDIgMC4wOTMyMTQ0IDE5LjE4NDQgMC44NTAxMiAxNi41MTU4QzMuMjMzOTQgOC4xMTIxNyAxMC4yODcyIDEuODYxNjMgMTguOTE2NSAwLjUwNjA0NkwyMC4zMzk0IDAuMjgyNDEzWk0xMC4xNTk3IDE4LjkyNUM3LjY1MTQ2IDE4LjkyNSA1LjYxNzcgMjEuNzY0NyA1LjYxNzcgMjUuMjY2OEM1LjYxNzg1IDI4Ljc2ODcgNy42NTE1NiAzMS42MDc2IDEwLjE1OTcgMzEuNjA3NkMxMi42Njc2IDMxLjYwNzMgMTQuNzAwNSAyOC43Njg1IDE0LjcwMDcgMjUuMjY2OEMxNC43MDA3IDIxLjc2NDkgMTIuNjY3NyAxOC45MjUzIDEwLjE1OTcgMTguOTI1Wk0yMy4zNTUgMTguOTI1QzIwLjg0NjkgMTguOTI1IDE4LjgxMzIgMjEuNzY0IDE4LjgxMyAyNS4yNjU4QzE4LjgxMyAyOC43Njc5IDIwLjg0NjggMzEuNjA3NiAyMy4zNTUgMzEuNjA3NkMyNS44NjMxIDMxLjYwNzUgMjcuODk2IDI4Ljc2NzggMjcuODk2IDI1LjI2NThDMjcuODk1OCAyMS43NjQxIDI1Ljg2MyAxOC45MjUxIDIzLjM1NSAxOC45MjVaIiBmaWxsPSJ3aGl0ZSIvPgo8L3N2Zz4K" alt=""></div><div class="loader-text">Загрузка...</div></div>
   <div id="toast" class="toast"></div>
   <div id="logsModal" class="logs-modal" onclick="if(event.target===this)closeLogs()">
     <div class="logs-content">
@@ -828,7 +831,8 @@ cat <<'EOF' > /www/podkop_panel/index.html
   </div>
   <div class="container">
     <header class="header">
-      <h1>⚡ RIFT</h1>
+      <img class="logo-img" src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTczIiBoZWlnaHQ9IjE3MyIgdmlld0JveD0iMCAwIDE3MyAxNzMiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIxNzMiIGhlaWdodD0iMTczIiByeD0iMjUiIGZpbGw9InVybCgjcGFpbnQwX2xpbmVhcl82OV8yKSIvPgo8cGF0aCBkPSJNNzkuMTQxNiA1Ni40MTAyQzgzLjU3MTEgNTUuNzE0MyA4OC4xMDc3IDU2LjMxMDggOTIuMjA3IDU4LjEyNzlDOTguNzM4NyA2MS4wMjM0IDEwMy41ODIgNjYuNzU0OSAxMDUuMzQ5IDczLjY3NzdMMTEzLjE3NyAxMDQuMzU5TDExMy4yNTggMTA0LjcyOUMxMTQuMDQ4IDEwOC4zMjkgMTExLjYyNSAxMTEuODQ3IDEwNy45NzkgMTEyLjM5MUwxMDcuNjI0IDExMi40NDNDMTA1LjkzNCAxMTIuNjk1IDEwNC4yMjIgMTEyLjE2NSAxMDIuOTcgMTExLjAwM0wxMDIuNDg0IDExMC41NTJDMTAxLjc1NiAxMDkuODc2IDEwMC43OTkgMTA5LjUgOTkuODA1NyAxMDkuNUM5OC4yMDIxIDEwOS41IDk2Ljc1OSAxMTAuNDc0IDk2LjE1NzIgMTExLjk2TDk1LjMwODYgMTE0LjA1NkM5NC42MjA2IDExNS43NTUgOTMuMzE4MiAxMTcuMTMyIDkxLjY2MDIgMTE3LjkxNEw5MC43NTc4IDExOC4zMzlDODkuMTEyMSAxMTkuMTE1IDg3LjI4MzggMTE5LjQxOSA4NS40NzU2IDExOS4yMTlMODMuMTk2MyAxMTguOTY1QzgxLjQ5NDggMTE4Ljc3NiA3OS45NDcgMTE3Ljg5MSA3OC45MjE5IDExNi41Mkw3Ni41OTM4IDExMy40MDZDNzUuMDc1NyAxMTEuMzc2IDcxLjk4NSAxMTEuNTI5IDcwLjY3NDggMTEzLjY5OUw3MC4zMjMyIDExNC4xNzJDNjguNzMzOSAxMTYuMzA2IDY1Ljk3ODQgMTE3LjIxOCA2My40Mjk3IDExNi40NTNMNjMuMjEzOSAxMTYuMzg4QzYwLjc1NjUgMTE1LjY1MSA1OS4wMzgxIDExMy40MzUgNTguOTM1NSAxMTAuODcxTDU5Ljc2OTUgOTUuNjQ0NUM1OS44OTg2IDkzLjI4ODYgNTkuODUxNyA5MC45MjYyIDU5LjYyOTkgODguNTc3MUw1OC45MDE0IDgwLjg1OTRDNTguNjQwNiA3OC4wOTc5IDU4Ljg5NTQgNzUuMzEyMSA1OS42NTIzIDcyLjY0MzZDNjIuMDM2MiA2NC4yMzk5IDY5LjA4OTQgNTcuOTg5NCA3Ny43MTg4IDU2LjYzMzhMNzkuMTQxNiA1Ni40MTAyWk02OC45NjE5IDc1LjA1MjdDNjYuNDUzNyA3NS4wNTI3IDY0LjQxOTkgNzcuODkyNSA2NC40MTk5IDgxLjM5NDVDNjQuNDIwMSA4NC44OTY0IDY2LjQ1MzggODcuNzM1NCA2OC45NjE5IDg3LjczNTRDNzEuNDY5OSA4Ny43MzUxIDczLjUwMjggODQuODk2MiA3My41MDI5IDgxLjM5NDVDNzMuNTAyOSA3Ny44OTI3IDcxLjQ3IDc1LjA1MyA2OC45NjE5IDc1LjA1MjdaTTgyLjE1NzIgNzUuMDUyN0M3OS42NDkxIDc1LjA1MjcgNzcuNjE1NCA3Ny44OTE3IDc3LjYxNTIgODEuMzkzNkM3Ny42MTUyIDg0Ljg5NTYgNzkuNjQ5IDg3LjczNTQgODIuMTU3MiA4Ny43MzU0Qzg0LjY2NTQgODcuNzM1MiA4Ni42OTgyIDg0Ljg5NTUgODYuNjk4MiA4MS4zOTM2Qzg2LjY5ODEgNzcuODkxOCA4NC42NjUzIDc1LjA1MjkgODIuMTU3MiA3NS4wNTI3WiIgZmlsbD0id2hpdGUiLz4KPGRlZnM+CjxsaW5lYXJHcmFkaWVudCBpZD0icGFpbnQwX2xpbmVhcl82OV8yIiB4MT0iMTUxLjk3IiB5MT0iNS40OTc2MiIgeDI9IjIuMjg1NjgiIHkyPSIxOTMuODc1IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+CjxzdG9wIG9mZnNldD0iMC4zMDA5MzEiIHN0b3AtY29sb3I9IiMwMDY4RkYiLz4KPHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjODVEOUZFIi8+CjwvbGluZWFyR3JhZGllbnQ+CjwvZGVmcz4KPC9zdmc+Cg==" alt="RIFT">
+      <h1>RIFT</h1>
       <div class="version" id="ver_line">...</div>
     </header>
     <div class="card active-card">
@@ -909,8 +913,9 @@ cat <<'EOF' > /www/podkop_panel/index.html
   }
   function extractSubId(url){
     if(!url)return '';
-    const parts=url.replace(/\/$/,'').split('/');
-    return parts[parts.length-1]||parts[parts.length-2]||'';
+    const parts=url.replace(/\/$/,'').split('/').filter(p=>p);
+    if(parts.length>=2)return parts[parts.length-2];
+    return parts[parts.length-1]||'';
   }
   async function loadData(){
     try{
