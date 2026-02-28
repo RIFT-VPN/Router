@@ -1,8 +1,8 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.6) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.7) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.6"
+PANEL_VERSION="3.7"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 # === MENU: detect existing installation ===
@@ -766,7 +766,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
     .active-card h3{color:rgba(255,255,255,.7)}
     .server-big{font-size:18px;font-weight:800;margin:8px 0 4px;display:block;word-break:break-word}
-    .server-meta{color:rgba(255,255,255,.75);font-size:12px}
+    .server-meta{color:rgba(255,255,255,.75);font-size:12px;display:block;margin-top:4px}
     .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
     .status-dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
     .status-dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
@@ -798,7 +798,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     input[type=text]:focus{border-color:var(--accent)}
     input[type=text]::placeholder{color:var(--text-sec)}
     .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,14,26,.85);backdrop-filter:blur(8px);z-index:9999;display:none;flex-direction:column;justify-content:center;align-items:center}
-    .ghost-loader{width:55px;height:64px;animation:ghostFloat 2s ease-in-out infinite;filter:drop-shadow(0 0 20px rgba(0,104,255,.4))}
+    .ghost-loader{width:55px;height:64px;animation:ghostFloat 2s ease-in-out infinite}
     .ghost-loader img{width:100%;height:100%}
     @keyframes ghostFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-16px)}}
     .loader-text{color:var(--accent);font-size:12px;margin-top:16px;opacity:.7;letter-spacing:1px}
