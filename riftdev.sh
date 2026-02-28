@@ -1,13 +1,13 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.0 — Remnawave + HWID + UI/UX) ===
-# Run: wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh | sh
+# === RIFT PANEL INSTALLER & UPDATER (V3.0 - Subscriptions, XHTTP, HWID, Logs) ===
+# Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.4"
+PANEL_VERSION="3.0"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 echo "=== УСТАНОВКА RIFT PANEL v${PANEL_VERSION} ==="
 
-# 1) deps
+# 1) deps (NO curl)
 echo "[1/8] Установка пакетов..."
 opkg update >/dev/null 2>&1
 opkg install ca-bundle coreutils-base64 lua uclient-fetch >/dev/null 2>&1 || true
@@ -22,16 +22,15 @@ if [ ! -s /etc/config/podkop_subs ]; then
 fi
 echo "${PANEL_VERSION}" > /etc/podkop_data/version
 
-# 3) Generate HWID
-echo "[3/8] Генерация HWID..."
+# Generate HWID if not exists
 if [ ! -f /etc/podkop_data/hwid ]; then
   MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")
-  HWID="RIFT-$(echo -n "$MAC" | md5sum | cut -c1-27)"
+  HWID=$(echo "$MAC" | md5sum | cut -c1-32)
   echo "$HWID" > /etc/podkop_data/hwid
 fi
 
-# 4) uhttpd
-echo "[4/8] Настройка веб-сервера (порт 2017)..."
+# 3) uhttpd
+echo "[3/8] Настройка веб-сервера (порт 2017)..."
 uci -q delete uhttpd.podkop_panel
 uci set uhttpd.podkop_panel=uhttpd
 uci add_list uhttpd.podkop_panel.listen_http='0.0.0.0:2017'
@@ -41,17 +40,17 @@ uci set uhttpd.podkop_panel.max_requests='10'
 uci set uhttpd.podkop_panel.cgi_prefix='/cgi-bin'
 uci commit uhttpd >/dev/null 2>&1
 
-# 5) remove rift domain
-echo "[5/8] Удаление домена rift (если был ранее)..."
+# 4) remove rift domain (IP only)
+echo "[4/8] Удаление домена rift (если был ранее)..."
 for s in $(uci show dhcp 2>/dev/null | sed -n "s/^\(dhcp\.@domain\[[0-9]\+\]\)=domain.*/\1/p"); do
   [ "$(uci -q get ${s}.name)" = "rift" ] && uci delete "$s"
 done
 uci -q del_list dhcp.@dnsmasq[0].rebind_domain='rift'
 uci commit dhcp >/dev/null 2>&1
 
-# 6) Backend (RPC)
-echo "[6/8] Запись Backend скрипта..."
-cat <<'BACKEND_EOF' > /www/podkop_panel/cgi-bin/rpc
+# 5) Backend (RPC)
+echo "[5/8] Запись Backend скрипта..."
+cat <<'EOF' > /www/podkop_panel/cgi-bin/rpc
 #!/usr/bin/lua
 
 function trim(s) return (tostring(s or ""):gsub("^%s*(.-)%s*$", "%1")) end
@@ -96,7 +95,7 @@ function serialize(val)
   if t=="table" then
     local parts={}
     for k,v in pairs(val) do
-      local key=(type(k)=="number") and "" or ('["'..k..'"]=' )
+      local key=(type(k)=="number") and "" or ('["'..k..'"]=')
       parts[#parts+1]=key..serialize(v)
     end
     return "{"..table.concat(parts,",").."}"
@@ -143,50 +142,71 @@ end
 
 local HAS_UCLIENT = cmd_exists("uclient-fetch")
 
-local function fetch_to_file(url, out, err, headers)
+-- Get HWID
+local function get_hwid()
+  local f = io.open("/etc/podkop_data/hwid","r")
+  if f then local h=trim(f:read("*a")); f:close(); return h end
+  return "unknown"
+end
+
+-- Get device model
+local function get_device_model()
+  local f = io.open("/tmp/sysinfo/model","r")
+  if f then local m=trim(f:read("*a")); f:close(); return m end
+  return "OpenWrt Router"
+end
+
+-- Get OS version
+local function get_os_version()
+  local v = exec_read("cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_RELEASE | cut -d\"'\" -f2")
+  if v == "" then v = exec_read("uname -r") end
+  return v
+end
+
+local function fetch_to_file(url, out, err, extra_headers)
   exec_silent("rm -f "..out.." "..err)
+  local ua = "v2rayNG/1.8.19"
   local cmd
+  local hdr = ""
+  if extra_headers then
+    for _,h in ipairs(extra_headers) do
+      if HAS_UCLIENT then
+        hdr = hdr .. " --header=" .. shq(h)
+      else
+        hdr = hdr .. " --header=" .. shq(h)
+      end
+    end
+  end
   if HAS_UCLIENT then
-    cmd = "uclient-fetch -q -O "..out
-    if headers then
-      for _,h in ipairs(headers) do
-        cmd = cmd.." --header="..shq(h)
-      end
-    end
-    cmd = cmd.." "..shq(url).." 2>"..err
+    cmd = "uclient-fetch -q -O "..out.." --header="..shq("User-Agent: "..ua)..hdr.." "..shq(url).." 2>"..err
   else
-    cmd = "wget -q -T 25 -O "..out
-    if headers then
-      for _,h in ipairs(headers) do
-        cmd = cmd.." --header="..shq(h)
-      end
-    end
-    cmd = cmd.." "..shq(url).." 2>"..err
+    cmd = "wget -q -T 25 -U "..shq(ua)..hdr.." -O "..out.." "..shq(url).." 2>"..err
   end
   local rc = os.execute(cmd)
   return (rc==0) or (rc==true)
 end
 
--- HWID helpers
-local function get_hwid()
-  local f=io.open("/etc/podkop_data/hwid","r")
-  if f then local h=trim(f:read("*a")) f:close() return h end
-  return "RIFT-unknown"
+-- fetch with HWID headers for Remnawave
+local function fetch_with_hwid(url, out, err)
+  local hwid = get_hwid()
+  local model = get_device_model()
+  local osver = get_os_version()
+  local headers = {
+    "x-hwid: " .. hwid,
+    "x-device-os: OpenWRT",
+    "x-ver-os: " .. osver,
+    "x-device-model: " .. model
+  }
+  return fetch_to_file(url, out, err, headers)
 end
 
-local function get_remnawave_headers()
-  local hwid = get_hwid()
-  local osver = exec_read("grep 'DISTRIB_RELEASE' /etc/openwrt_release 2>/dev/null | cut -d\"'\" -f2")
-  if osver == "" then osver = exec_read("uname -r") end
-  local model = exec_read("cat /tmp/sysinfo/model 2>/dev/null")
-  if model == "" then model = "OpenWrt Router" end
-  return {
-    "x-hwid: "..hwid,
-    "x-device-os: OpenWrt",
-    "x-ver-os: "..(osver ~= "" and osver or "unknown"),
-    "x-device-model: "..model,
-    "User-Agent: RIFT-Panel/"..trim(exec_read("cat /etc/podkop_data/version 2>/dev/null") or "3.0")
-  }
+-- smart fetch: try with HWID first, fallback without
+local function smart_fetch(url, out, err)
+  local ok = fetch_with_hwid(url, out, err)
+  if not ok then
+    ok = fetch_to_file(url, out, err)
+  end
+  return ok
 end
 
 -- parse query string
@@ -199,63 +219,91 @@ local method=params.method
 
 print("Content-type: application/json; charset=utf-8\n")
 
-local REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
+local REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
--- link parsing (line-by-line to preserve names with spaces)
-local PROTOCOLS={"vless://","trojan://","ss://","vmess://","hysteria2://","tuic://"}
+-- URL decode helper
+local function url_decode(s)
+  if not s then return "" end
+  return s:gsub("%%(%x%x)",function(h)return string.char(tonumber(h,16))end)
+end
+
+-- Extract query param from a URL
+local function url_get_param(url, param)
+  local val = url:match("[?&]" .. param .. "=([^&#]*)")
+  if val then return url_decode(val) end
+  return ""
+end
+
+-- link parsing: finds links ANYWHERE in text (decoded or plain)
 local function extract_links(text)
   local out={}
   if not text then return out end
-  for line in (text.."\n"):gmatch("([^\n]+)") do
-    line=trim(line)
-    if line~="" then
-      for _,proto in ipairs(PROTOCOLS) do
-        if line:sub(1,#proto)==proto then
-          out[#out+1]=line
-          break
-        end
-      end
-    end
+  local function push(u)
+    if not u or u=="" then return end
+    u = u:gsub("[\"'%)]*$",""):gsub("[,;]+$","")
+    out[#out+1]=u
   end
+  for u in text:gmatch("(vless://[^%s]+)") do push(u) end
+  for u in text:gmatch("(trojan://[^%s]+)") do push(u) end
+  for u in text:gmatch("(ss://[^%s]+)") do push(u) end
+  for u in text:gmatch("(vmess://[^%s]+)") do push(u) end
+  for u in text:gmatch("(hysteria2://[^%s]+)") do push(u) end
+  for u in text:gmatch("(tuic://[^%s]+)") do push(u) end
   return out
-end
-
--- safe URL-decode: only decode %XX where XX are valid hex pairs
-local function url_decode_safe(s)
-  if not s then return "" end
-  return s:gsub("%%(%x%x)",function(h) return string.char(tonumber(h,16)) end)
-end
-
-local FILTER_KEYWORDS={"Обход БС","обход бс"}
-local function should_filter(name)
-  for _,kw in ipairs(FILTER_KEYWORDS) do
-    if name:find(kw,1,true) then return true end
-  end
-  return false
 end
 
 local function link_to_node(line)
   local proto=(line:match("^(%w+)://") or "LINK"):upper()
   local ne=line:match("#(.+)$")
   local name="Server"
-  if ne then name=url_decode_safe(ne) end
-  local host=line:match("@(.-):" ) or line:match("://([^/:#%?]+)") or "unknown"
-  local ti=proto
-  if line:match("security=reality") then ti="Reality" end
-  return {name=name, host=host, type=ti, full_url=line}
+  if ne then name=url_decode(ne) end
+  local host=line:match("@(.-):") or line:match("://([^/:#%?]+)") or "unknown"
+
+  -- Determine transport type
+  local transport = url_get_param(line, "type")
+  if transport == "" then transport = "tcp" end
+  transport = transport:lower()
+
+  -- Determine security
+  local security = url_get_param(line, "security")
+
+  -- Build display type
+  local ti = proto
+  if security == "reality" then ti = "Reality" end
+
+  -- Transport label
+  local transport_label = transport:upper()
+  if transport == "tcp" then transport_label = "TCP"
+  elseif transport == "grpc" then transport_label = "gRPC"
+  elseif transport == "xhttp" then transport_label = "XHTTP"
+  elseif transport == "ws" then transport_label = "WS"
+  end
+
+  -- Extract additional transport params
+  local service_name = url_get_param(line, "serviceName")
+  local path = url_get_param(line, "path")
+  local mode = url_get_param(line, "mode")
+  local flow = url_get_param(line, "flow")
+
+  return {
+    name=name,
+    host=host,
+    type=ti,
+    transport=transport,
+    transport_label=transport_label,
+    security=security,
+    service_name=service_name,
+    path=path,
+    mode=mode,
+    flow=flow,
+    full_url=line
+  }
 end
 
 local function parse_nodes_any(text)
   local nodes={}
-  local seen={}
   local links=extract_links(text or "")
-  for _,u in ipairs(links) do
-    local n=link_to_node(u)
-    if not should_filter(n.name) and not seen[n.host] then
-      seen[n.host]=true
-      nodes[#nodes+1]=n
-    end
-  end
+  for _,u in ipairs(links) do nodes[#nodes+1]=link_to_node(u) end
   return nodes
 end
 
@@ -272,57 +320,18 @@ local function try_decode_base64(raw)
   if #t < 16 then return "" end
   if not t:match("^[%w%+/%=_%-%s]+$") then return "" end
   t = b64_urlsafefix(t)
-  local tmp_b64="/tmp/rift_b64.tmp"
-  local tmp_dec="/tmp/rift_dec.tmp"
-  local fb=io.open(tmp_b64,"w")
-  if fb then fb:write(t) fb:close() end
-  exec_silent("base64 -d "..tmp_b64.." > "..tmp_dec.." 2>/dev/null")
-  local fd=io.open(tmp_dec,"r")
-  local dec=""
-  if fd then dec=fd:read("*a") or "" fd:close() end
-  exec_silent("rm -f "..tmp_b64.." "..tmp_dec)
-  return dec
+  local dec = exec_read("printf %s " .. shq(t) .. " | base64 -d 2>/dev/null")
+  return dec or ""
 end
 
 -- RPC methods
-
 if method=="get_panel_info" then
   local f=io.open("/etc/podkop_data/version","r")
   local v=f and f:read("*a") or "0.0"
   if f then f:close() end
-  print(to_json({version=trim(v)}))
-  os.exit(0)
-end
-
-if method=="get_hwid" then
   local hwid = get_hwid()
-  local osver = exec_read("grep 'DISTRIB_RELEASE' /etc/openwrt_release 2>/dev/null | cut -d\"'\" -f2")
-  local model = exec_read("cat /tmp/sysinfo/model 2>/dev/null")
-  if model == "" then model = "OpenWrt Router" end
-  print(to_json({hwid=hwid, device_os="OpenWrt", os_version=osver, device_model=model}))
-  os.exit(0)
-end
-
-if method=="get_traffic" then
-  local nft_out = exec_read("nft list table inet PodkopTable 2>/dev/null | grep 'counter packets' | head -4")
-  local total_packets, total_bytes = 0, 0
-  for p, b in nft_out:gmatch("counter packets (%d+) bytes (%d+)") do
-    total_packets = total_packets + tonumber(p)
-    total_bytes = total_bytes + tonumber(b)
-  end
-  local uptime = exec_read("cat /proc/uptime 2>/dev/null | awk '{print $1}'")
-  print(to_json({packets=total_packets, bytes=total_bytes, uptime=tonumber(uptime) or 0}))
-  os.exit(0)
-end
-
-if method=="get_system" then
-  local meminfo = exec_read("cat /proc/meminfo 2>/dev/null")
-  local mem_total = tonumber(meminfo:match("MemTotal:%s*(%d+)")) or 0
-  local mem_free = tonumber(meminfo:match("MemFree:%s*(%d+)")) or 0
-  local mem_avail = tonumber(meminfo:match("MemAvailable:%s*(%d+)")) or mem_free
-  local uptime = tonumber(exec_read("cat /proc/uptime | awk '{print $1}'")) or 0
-  local model = exec_read("cat /tmp/sysinfo/model 2>/dev/null")
-  print(to_json({mem_total=mem_total, mem_available=mem_avail, uptime=uptime, model=model}))
+  local model = get_device_model()
+  print(to_json({version=trim(v), hwid=hwid, device_model=model}))
   os.exit(0)
 end
 
@@ -331,14 +340,16 @@ if method=="check_for_update" then
   local err="/tmp/rift_remote.err"
   local ok = fetch_to_file(REMOTE_SCRIPT_URL, tmp, err)
   if not ok then
-    print(to_json({status="error", msg="Не удалось скачать обновление"}))
+    print(to_json({status="error", msg="Не удалось скачать обновление", sample=exec_read("cat "..err.." 2>/dev/null | head -c 160")}))
     os.exit(0)
   end
   local remote_script = exec_read("cat "..tmp.." 2>/dev/null")
   local remote_version = remote_script:match('PANEL_VERSION="([%d%.]+)"')
+
   local f=io.open("/etc/podkop_data/version","r")
   local local_version=f and trim(f:read("*a")) or "0.0"
   if f then f:close() end
+
   if remote_version and local_version then
     if cmp_ver(remote_version, local_version)==1 then
       print(to_json({status="update_available",local_v=local_version,remote_v=remote_version}))
@@ -348,6 +359,9 @@ if method=="check_for_update" then
   else
     print(to_json({status="error", msg="Не удалось распарсить версию"}))
   end
+  -- cleanup temp files
+  os.remove(tmp)
+  os.remove(err)
   os.exit(0)
 end
 
@@ -356,10 +370,12 @@ if method=="perform_update" then
   local err="/tmp/rift_update.err"
   local ok = fetch_to_file(REMOTE_SCRIPT_URL, tmp, err)
   if not ok then
-    print(to_json({status="error", msg="Не удалось скачать скрипт обновления"}))
+    print(to_json({status="error", msg="Не удалось скачать скрипт обновления", sample=exec_read("cat "..err.." 2>/dev/null | head -c 160")}))
     os.exit(0)
   end
   exec_silent("sh "..tmp)
+  os.remove(tmp)
+  os.remove(err)
   print('{"status":"ok"}')
   os.exit(0)
 end
@@ -368,6 +384,7 @@ if method=="get_nodes" then
   local s,db=pcall(dofile,"/etc/podkop_data/nodes.lua")
   if not s or type(db)~="table" then db={nodes={}} end
   if type(db.nodes)~="table" then db.nodes={} end
+
   local cp=uci_get("podkop","main","proxy_string")
   local r=exec_silent("pgrep -f podkop")
   local rn=(r==0)or(r==true)
@@ -375,11 +392,6 @@ if method=="get_nodes" then
   print(to_json({
     nodes=db.nodes,
     expire=db.expire or "Нет данных",
-    expire_ts=db.expire_ts or 0,
-    expire_days=db.expire_days or 0,
-    sub_download=db.sub_download or 0,
-    sub_total=db.sub_total or 0,
-    sub_title=db.sub_title or "",
     updated=db.updated or "Никогда",
     active_url=dp,
     running=rn
@@ -394,24 +406,29 @@ if method=="update_subs" then
     print('{"status":"error","msg":"URL не найден!"}')
     os.exit(0)
   end
+
+  -- save url
   exec_silent("uci -q delete podkop_subs.config.url")
   uci_set("podkop_subs","config","url",url)
   exec_silent("uci commit podkop_subs")
 
   local body="/tmp/podkop_sub.body"
   local err="/tmp/podkop_sub.err"
-  local hdrs = get_remnawave_headers()
-  local ok = fetch_to_file(url, body, err, hdrs)
+  local ok = smart_fetch(url, body, err)
   local raw = exec_read("cat "..body.." 2>/dev/null")
   local e   = exec_read("cat "..err.." 2>/dev/null")
 
   if (not ok) or raw=="" then
     local sample = (e ~= "" and e:gsub("\n"," "):sub(1,220)) or "empty body"
     print(to_json({status="error", msg="Ошибка загрузки подписки", sample=sample}))
+    os.remove(body); os.remove(err)
     os.exit(0)
   end
 
+  -- 1) parse raw
   local nodes = parse_nodes_any(raw)
+
+  -- 2) parse decoded base64 (standard + urlsafe)
   local decoded = ""
   if #nodes == 0 then
     decoded = try_decode_base64(raw)
@@ -424,61 +441,12 @@ if method=="update_subs" then
     local s1 = raw:gsub("\n"," "):sub(1,180)
     local s2 = (decoded ~= "" and decoded:gsub("\n"," "):sub(1,180)) or ""
     local extra = (s2 ~= "" and (" | decoded: "..s2)) or ""
-    print(to_json({status="error", msg="Серверы не найдены", sample=("raw: "..s1..extra)}))
+    print(to_json({status="error", msg="Серверы не найдены в ответе подписки", sample=("raw: "..s1..extra)}))
+    os.remove(body); os.remove(err)
     os.exit(0)
   end
 
-  -- capture headers for subscription info
-  local expire_ts, expire_days, sub_download, sub_total, sub_title = 0, 0, 0, 0, ""
-  local hdr_file = "/tmp/podkop_sub_hdr.txt"
-  local hdr_cmd
-  if HAS_UCLIENT then
-    hdr_cmd = "uclient-fetch -v -O /dev/null"
-    for _,h in ipairs(hdrs) do hdr_cmd = hdr_cmd.." --header="..shq(h) end
-    hdr_cmd = hdr_cmd.." "..shq(url).." 2>&1 > "..hdr_file
-  else
-    hdr_cmd = "wget --server-response -q -O /dev/null"
-    for _,h in ipairs(hdrs) do hdr_cmd = hdr_cmd.." --header="..shq(h) end
-    hdr_cmd = hdr_cmd.." "..shq(url).." 2>&1 > "..hdr_file
-  end
-  exec_silent(hdr_cmd)
-  local hdr_data = exec_read("cat "..hdr_file.." 2>/dev/null")
-  exec_silent("rm -f "..hdr_file)
-
-  -- parse subscription-userinfo: upload=X; download=X; total=X; expire=X
-  if hdr_data ~= "" then
-    local sui = hdr_data:match("subscription%-userinfo[:%s]*([^\n]+)")
-    if sui then
-      local exp = sui:match("expire=(%d+)")
-      if exp then expire_ts = tonumber(exp) or 0 end
-      local dl = sui:match("download=(%d+)")
-      if dl then sub_download = tonumber(dl) or 0 end
-      local tot = sui:match("total=(%d+)")
-      if tot then sub_total = tonumber(tot) or 0 end
-    end
-    -- parse profile-title for time remaining (e.g. "22D,6H")
-    local pt_line = hdr_data:match("profile%-title[:%s]*([^\n]+)")
-    if pt_line then
-      local pt = pt_line
-      if pt:match("^base64:") then
-        local b64 = pt:gsub("^base64:","")
-        local tmp_b = "/tmp/rift_pt.tmp"
-        local fb = io.open(tmp_b,"w")
-        if fb then fb:write(b64) fb:close() end
-        pt = exec_read("base64 -d "..tmp_b.." 2>/dev/null")
-        exec_silent("rm -f "..tmp_b)
-      end
-      sub_title = pt or ""
-      -- extract days/hours pattern like "22D,6H" or "22D" or "6H"
-      local days = pt:match("(%d+)D")
-      local hours = pt:match("(%d+)H")
-      if days or hours then
-        expire_days = (tonumber(days) or 0) + (tonumber(hours) or 0) / 24
-      end
-    end
-  end
-
-  local db={expire="Нет данных", expire_ts=expire_ts, expire_days=expire_days, sub_download=sub_download, sub_total=sub_total, sub_title=sub_title, updated=os.date("%Y-%m-%d %H:%M:%S"), nodes=nodes}
+  local db={expire="Нет данных", updated=os.date("%Y-%m-%d %H:%M:%S"), nodes=nodes}
   local f=io.open("/etc/podkop_data/nodes.lua","w")
   if f then
     f:write("return "..serialize(db))
@@ -487,6 +455,8 @@ if method=="update_subs" then
   else
     print('{"status":"error","msg":"Ошибка записи nodes.lua"}')
   end
+  -- cleanup
+  os.remove(body); os.remove(err)
   os.exit(0)
 end
 
@@ -584,555 +554,563 @@ if method=="get_sub_url" then
   os.exit(0)
 end
 
-print('{"status":"error","msg":"unknown method"}')
-BACKEND_EOF
+if method=="get_logs" then
+  local lines = params.lines or "50"
+  local log_output = exec_read("logread -e podkop 2>/dev/null | tail -n " .. lines)
+  if log_output == "" then
+    log_output = exec_read("logread 2>/dev/null | grep -i 'podkop\\|sing-box' | tail -n " .. lines)
+  end
+  print(to_json({logs=log_output}))
+  os.exit(0)
+end
 
-# Mark as next step
-echo "[6/8] Backend готов. Записываю Frontend..."
-cat <<'FRONTEND_EOF' > /www/podkop_panel/index.html
+if method=="get_hwid_info" then
+  local hwid = get_hwid()
+  local model = get_device_model()
+  local osver = get_os_version()
+  print(to_json({hwid=hwid, device_model=model, os_version=osver, os_type="OpenWRT"}))
+  os.exit(0)
+end
+
+print('{"status":"error","msg":"unknown method"}')
+EOF
+
+# 6) Frontend (HTML)
+echo "[6/8] Запись Frontend интерфейса..."
+cat <<'EOF' > /www/podkop_panel/index.html
 <!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>RIFT Panel</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <style>
-:root{--bg:#060a14;--surface:#0d1220;--card:rgba(14,20,38,.85);--card-hover:rgba(20,28,50,.9);--border:rgba(255,255,255,.06);--border-active:rgba(0,104,255,.3);--text:#f0f2f8;--text-sec:#8b92a8;--text-dim:rgba(255,255,255,.35);--blue:#0068FF;--blue-light:#5ba3ff;--cyan:#85D9FE;--green:#34d399;--yellow:#fbbf24;--red:#f87171;--glow:0 0 30px rgba(0,104,255,.15)}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100dvh;overflow-x:hidden}
-body::before{content:'';position:fixed;top:-200px;left:-100px;width:500px;height:500px;background:radial-gradient(circle,rgba(0,104,255,.08) 0%,transparent 70%);pointer-events:none;z-index:0}
-body::after{content:'';position:fixed;bottom:-200px;right:-100px;width:400px;height:400px;background:radial-gradient(circle,rgba(133,217,254,.06) 0%,transparent 70%);pointer-events:none;z-index:0}
-.app{position:relative;z-index:1;max-width:460px;margin:0 auto;padding:20px 16px 90px}
-.header{display:flex;align-items:center;justify-content:space-between;padding:8px 0 24px}
-.header .logo{display:flex;align-items:center;gap:10px}
-.header .logo-icon{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--blue),var(--cyan));display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:var(--glow)}
-.header h1{font-size:22px;font-weight:900;letter-spacing:.5px;background:linear-gradient(135deg,#fff,var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.header .ver{font-size:10px;color:var(--text-dim);background:rgba(255,255,255,.06);padding:4px 10px;border-radius:20px;font-weight:600;letter-spacing:.5px}
-.hero{background:linear-gradient(145deg,rgba(0,104,255,.2),rgba(133,217,254,.08));border:1px solid rgba(0,104,255,.2);border-radius:24px;padding:28px 24px 20px;margin-bottom:16px;position:relative;overflow:hidden;animation:fadeIn .6s ease}
-.hero::before{content:'';position:absolute;top:0;right:0;width:180px;height:180px;background:radial-gradient(circle,rgba(0,104,255,.15) 0%,transparent 70%);pointer-events:none}
-.hero-status{display:flex;align-items:center;gap:8px;margin-bottom:16px}
-.hero-status .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.hero-status .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
-.hero-status .dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
-.hero-status .dot{animation:blink 2.5s ease-in-out infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-.hero-status span{font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-sec)}
-.hero .name{font-size:22px;font-weight:800;line-height:1.2;margin-bottom:6px;word-break:break-word}
-.hero .updated{font-size:12px;color:var(--text-sec)}
-.hero-actions{display:flex;gap:10px;margin-top:18px}
-.btn-hero{flex:1;padding:13px;border-radius:14px;font-size:13px;font-weight:700;border:none;cursor:pointer;transition:all .2s;font-family:inherit}
-.btn-hero:active{transform:scale(.96)}
-.btn-hero.primary{background:linear-gradient(135deg,var(--blue),var(--blue-light));color:#fff;box-shadow:0 4px 20px rgba(0,104,255,.3)}
-.hero .timer{text-align:center;font-size:11px;color:var(--text-dim);margin-top:12px;letter-spacing:.3px}
-@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
-.bento{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px}
-.bento-item{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:16px 12px;text-align:center;transition:border-color .3s,transform .2s;animation:fadeIn .5s ease both}
-.bento-item:nth-child(1){animation-delay:.05s}.bento-item:nth-child(2){animation-delay:.1s}.bento-item:nth-child(3){animation-delay:.15s}
-.bento-item:hover{border-color:var(--border-active);transform:translateY(-2px)}
-.bento-item .b-icon{font-size:18px;margin-bottom:8px;opacity:.9}
-.bento-item .b-val{font-size:18px;font-weight:800;color:#fff}
-.bento-item .b-lbl{font-size:9px;color:var(--text-sec);margin-top:5px;text-transform:uppercase;letter-spacing:.8px;font-weight:600}
-.section{background:var(--card);border:1px solid var(--border);border-radius:22px;padding:22px;margin-bottom:14px;animation:fadeIn .5s ease both}
-.section-title{display:flex;align-items:center;gap:8px;margin-bottom:16px}
-.section-title .s-icon{width:32px;height:32px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
-.section-title h3{font-size:14px;font-weight:700;color:var(--text);letter-spacing:.3px;text-transform:none;margin:0}
-.section-title .s-count{margin-left:auto;font-size:11px;color:var(--text-dim);background:rgba(255,255,255,.06);padding:3px 10px;border-radius:20px;font-weight:600}
-.s-blue{background:rgba(0,104,255,.15)}.s-green{background:rgba(52,211,153,.15)}.s-purple{background:rgba(168,85,247,.15)}.s-orange{background:rgba(251,146,60,.15)}
-.list-item{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);transition:background .2s}
-.list-item:last-child{border-bottom:none}
-.list-item:hover{background:rgba(255,255,255,.02);margin:0 -10px;padding:12px 10px;border-radius:12px}
-.li-info{flex:1;min-width:0}
-.li-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
-.li-sub{font-size:11px;color:var(--text-sec);margin-top:2px}
-.li-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
-.btn{border:none;border-radius:10px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;font-family:inherit}
-.btn:active{transform:scale(.93)}
-.btn-sm{padding:6px 12px;font-size:11px;border-radius:8px}
-.btn-primary{background:linear-gradient(135deg,var(--blue),var(--blue-light));color:#fff}
-.btn-ghost{background:rgba(0,104,255,.1);color:var(--blue-light);border:1px solid rgba(0,104,255,.15)}
-.btn-active{background:rgba(52,211,153,.15);color:var(--green);border:1px solid rgba(52,211,153,.2);cursor:default}
-.btn-danger{background:rgba(248,113,113,.1);color:var(--red);border:1px solid rgba(248,113,113,.15)}
-.ping-badge{font-size:10px;font-weight:700;padding:4px 8px;border-radius:6px;min-width:46px;text-align:center;letter-spacing:.3px}
-.ping-good{background:rgba(52,211,153,.12);color:var(--green)}.ping-mid{background:rgba(251,191,36,.12);color:var(--yellow)}.ping-bad{background:rgba(248,113,113,.12);color:var(--red)}.ping-wait{background:rgba(255,255,255,.04);color:var(--text-dim)}
-.input-row{display:flex;gap:8px;margin-top:14px}
-input[type=text]{background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--text);padding:12px 14px;border-radius:12px;width:100%;font-size:13px;font-family:inherit;outline:none;transition:all .2s}
-input[type=text]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(0,104,255,.1)}
-input[type=text]::placeholder{color:var(--text-dim)}
-.hwid-card{display:flex;align-items:center;gap:14px}
-.hwid-icon{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--blue),var(--cyan));display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;box-shadow:var(--glow)}
-.hwid-info .hwid-val{font-size:11px;font-weight:600;font-family:'Courier New',monospace;color:var(--cyan);word-break:break-all;letter-spacing:.5px}
-.hwid-info .hwid-meta{font-size:11px;color:var(--text-sec);margin-top:4px}
-.toast{position:fixed;left:16px;right:16px;bottom:24px;padding:14px 18px;border-radius:16px;background:var(--surface);border:1px solid var(--border);backdrop-filter:blur(20px);color:#fff;z-index:10000;font-size:13px;font-weight:500;transform:translateY(120px);opacity:0;transition:all .4s cubic-bezier(.4,0,.2,1);max-width:460px;margin:0 auto;box-shadow:0 10px 40px rgba(0,0,0,.5)}
-.toast.show{transform:translateY(0);opacity:1}
-.loader{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(6,10,20,.85);backdrop-filter:blur(8px);z-index:9999;display:none;justify-content:center;align-items:center}
-.loader.show{display:flex}
-.spinner{width:36px;height:36px;border:3px solid rgba(255,255,255,.08);border-top:3px solid var(--cyan);border-radius:50%;animation:spin .7s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.skeleton{background:linear-gradient(90deg,rgba(255,255,255,.03) 25%,rgba(255,255,255,.06) 50%,rgba(255,255,255,.03) 75%);background-size:200% 100%;animation:skel 1.5s ease-in-out infinite;border-radius:8px;height:16px;margin:4px 0}
-@keyframes skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
-.footer{text-align:center;padding:12px 0}
-.footer span{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
-.footer button{background:rgba(0,104,255,.08);border:1px solid rgba(0,104,255,.15);color:var(--blue-light);padding:6px 14px;border-radius:10px;font-size:10px;font-weight:700;cursor:pointer;margin-left:6px;font-family:inherit;transition:all .2s}
-.footer button:hover{background:rgba(0,104,255,.15)}
-@media(max-width:360px){.bento{grid-template-columns:1fr 1fr}.bento-item:nth-child(3){grid-column:span 2}}
+    :root{
+      --bg:#0F1923;
+      --card:#1A2735;
+      --card-hover:#1E2F40;
+      --text:#E8EDF2;
+      --text-sec:#7B8D9E;
+      --accent:#00D4FF;
+      --accent2:#0099CC;
+      --grad1:#00D4FF;
+      --grad2:#0066FF;
+      --green:#00E676;
+      --red:#FF5252;
+      --orange:#FFB74D;
+      --border:rgba(0,212,255,.12);
+      --shadow:0 4px 24px rgba(0,0,0,.4);
+    }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+    .container{max-width:520px;margin:0 auto;padding:16px}
+    .header{text-align:center;padding:20px 0 12px}
+    .header h1{font-size:28px;font-weight:800;background:linear-gradient(135deg,var(--grad1),var(--grad2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:1px}
+    .header .version{font-size:11px;color:var(--text-sec);margin-top:4px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:14px;box-shadow:var(--shadow);transition:all .2s}
+    h3{margin:0 0 14px;font-weight:700;font-size:14px;color:var(--text-sec);text-transform:uppercase;letter-spacing:.8px}
+    .active-card{background:linear-gradient(135deg,#0066FF 0%,#00D4FF 100%);border:none;text-align:center;color:#fff;position:relative;overflow:hidden}
+    .active-card::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.06) 0%,transparent 70%);animation:pulse 4s ease-in-out infinite}
+    @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+    .active-card h3{color:rgba(255,255,255,.7)}
+    .server-big{font-size:20px;font-weight:800;margin:8px 0 4px;display:block}
+    .server-meta{color:rgba(255,255,255,.75);font-size:12px}
+    .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+    .status-dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+    .status-dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
+    .btn{border:none;border-radius:12px;font-weight:700;font-size:13px;cursor:pointer;transition:all .15s;outline:none}
+    .btn-primary{background:linear-gradient(135deg,var(--grad1),var(--grad2));color:#fff;padding:10px 18px}
+    .btn-primary:active{transform:scale(.97)}
+    .btn-outline{background:rgba(0,212,255,.08);border:1px solid rgba(0,212,255,.25);color:var(--accent);padding:8px 14px;font-size:12px}
+    .btn-outline:active{background:rgba(0,212,255,.15)}
+    .btn-danger{background:rgba(255,82,82,.1);border:1px solid rgba(255,82,82,.25);color:var(--red);padding:6px 12px;font-size:11px}
+    .btn-active{background:linear-gradient(135deg,var(--green),#00C853);color:#fff;padding:8px 14px;font-size:12px;border:none}
+    .btn-full{width:100%;padding:12px;margin-top:12px;font-size:14px}
+    .list-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
+    .list-row:last-child{border-bottom:none;padding-bottom:0}
+    .item-name{font-weight:600;font-size:13px;color:var(--text)}
+    .item-sub{display:block;font-size:11px;color:var(--text-sec);margin-top:2px}
+    .transport-badge{display:inline-block;font-size:9px;font-weight:800;padding:2px 6px;border-radius:6px;margin-left:6px;vertical-align:middle}
+    .badge-tcp{background:rgba(0,212,255,.12);color:var(--accent)}
+    .badge-grpc{background:rgba(255,183,77,.12);color:var(--orange)}
+    .badge-xhttp{background:rgba(0,230,118,.12);color:var(--green)}
+    .badge-ws{background:rgba(156,39,176,.12);color:#CE93D8}
+    .input-group{display:flex;gap:8px;margin-top:12px}
+    input[type=text]{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;width:100%;font-size:12px;font-family:inherit;outline:none;transition:border .2s}
+    input[type=text]:focus{border-color:var(--accent)}
+    input[type=text]::placeholder{color:var(--text-sec)}
+    .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);z-index:9999;display:none;justify-content:center;align-items:center}
+    .spinner{width:44px;height:44px;border:3px solid rgba(0,212,255,.15);border-top:3px solid var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+    @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+    .toast{display:none;position:fixed;left:12px;right:12px;bottom:12px;padding:12px 16px;border-radius:12px;background:var(--card);border:1px solid var(--border);color:var(--text);z-index:10000;font-size:12px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+    .logs-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.8);backdrop-filter:blur(8px);z-index:9998;overflow-y:auto}
+    .logs-content{max-width:560px;margin:40px auto;padding:20px;background:var(--card);border-radius:16px;border:1px solid var(--border)}
+    .logs-text{font-family:'Courier New',monospace;font-size:11px;line-height:1.6;color:var(--green);background:rgba(0,0,0,.3);padding:12px;border-radius:8px;max-height:60vh;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+    .logs-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+    .hwid-block{font-size:11px;color:var(--text-sec);padding:8px 12px;background:rgba(0,0,0,.2);border-radius:8px;margin-top:8px;word-break:break-all}
+    .hwid-block b{color:var(--accent)}
+    .empty-state{text-align:center;padding:20px 0;color:var(--text-sec);font-size:13px}
   </style>
 </head>
 <body>
-  <div id="loader" class="loader"><div class="spinner"></div></div>
+  <div id="preloader" class="preloader-overlay"><div class="spinner"></div></div>
   <div id="toast" class="toast"></div>
-  <div class="app">
-    <header class="header">
-      <div class="logo">
-        <div class="logo-icon">⚡</div>
-        <h1>RIFT</h1>
+
+  <div id="logsModal" class="logs-modal" onclick="if(event.target===this)closeLogs()">
+    <div class="logs-content">
+      <div class="logs-header">
+        <h3 style="margin:0">📋 Логи Podkop</h3>
+        <button class="btn btn-outline" onclick="closeLogs()">Закрыть</button>
       </div>
-      <span class="ver" id="ver_label">v...</span>
+      <div>
+        <button class="btn btn-outline" onclick="loadLogs()" style="margin-bottom:10px">🔄 Обновить</button>
+        <button class="btn btn-outline" onclick="loadLogs(200)" style="margin-bottom:10px;margin-left:6px">Больше</button>
+      </div>
+      <div id="logs_text" class="logs-text">Загрузка...</div>
+    </div>
+  </div>
+
+  <div class="container">
+    <header class="header">
+      <h1>⚡ RIFT</h1>
+      <div class="version" id="ver_line">...</div>
     </header>
 
-    <div class="hero" id="hero_card">
-      <div class="hero-status"><div class="dot off" id="status_dot"></div><span>Подключение</span></div>
-      <div class="name" id="active_name"><div class="skeleton" style="width:65%;height:24px"></div></div>
-      <div class="updated" id="sub_meta">Загрузка...</div>
-      <div class="hero-actions">
-        <button class="btn-hero primary" onclick="updateSubs()">🔄 Обновить подписку</button>
-      </div>
-      <div class="timer" id="refresh_timer"></div>
+    <div class="card active-card">
+      <h3>АКТИВНОЕ ПОДКЛЮЧЕНИЕ</h3>
+      <span id="status_indicator"></span>
+      <span class="server-big" id="active_name">...</span>
+      <span class="server-meta" id="sub_meta">...</span>
+      <button class="btn btn-full" style="background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.2)" onclick="updateSubs()">🔄 Обновить подписку</button>
     </div>
 
-    <div class="bento">
-      <div class="bento-item"><div class="b-icon">📊</div><div class="b-val" id="st_traffic">—</div><div class="b-lbl">Трафик</div></div>
-      <div class="bento-item"><div class="b-icon">📅</div><div class="b-val" id="st_expire">—</div><div class="b-lbl">Подписка</div></div>
-      <div class="bento-item"><div class="b-icon">💾</div><div class="b-val" id="st_mem">—</div><div class="b-lbl">RAM</div></div>
-    </div>
-
-    <div class="section" style="animation-delay:.1s">
-      <div class="section-title"><div class="s-icon s-blue">🔑</div><h3>Устройство</h3></div>
-      <div class="hwid-card">
-        <div class="hwid-icon">�</div>
-        <div class="hwid-info">
-          <div class="hwid-val" id="hwid_val">...</div>
-          <div class="hwid-meta" id="hwid_meta">OpenWrt</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="section" style="animation-delay:.15s">
-      <div class="section-title"><div class="s-icon s-green">🌐</div><h3>Серверы</h3><span class="s-count" id="nodes_count">0</span></div>
-      <div id="nodes_list"><div class="skeleton"></div><div class="skeleton" style="width:80%"></div><div class="skeleton" style="width:60%"></div></div>
-      <div class="input-row">
+    <div class="card">
+      <h3>🌐 Серверы</h3>
+      <div id="nodes_list"></div>
+      <div class="input-group">
         <input type="text" id="sub_url" placeholder="Ссылка на подписку...">
         <button class="btn btn-primary" onclick="saveUrl()">💾</button>
       </div>
     </div>
 
-    <div class="section" style="animation-delay:.2s">
-      <div class="section-title"><div class="s-icon s-purple">📡</div><h3>VPN для устройств</h3></div>
-      <div class="input-row" style="margin-top:0">
+    <div class="card">
+      <h3>🔒 VPN для устройства</h3>
+      <div class="input-group">
         <input type="text" id="manual_ip" placeholder="IP (192.168.1.X)">
         <button class="btn btn-primary" onclick="addManualIp()">+</button>
       </div>
       <div id="vpn_list" style="margin-top:10px"></div>
     </div>
 
-    <div class="section" style="animation-delay:.25s">
-      <div class="section-title"><div class="s-icon s-orange">🎯</div><h3>Домены через VPN</h3></div>
-      <div class="input-row" style="margin-top:0">
+    <div class="card">
+      <h3>🎯 Домены через VPN</h3>
+      <div class="input-group">
         <input type="text" id="new_domain" placeholder="domain.com">
         <button class="btn btn-primary" onclick="addDomain()">+</button>
       </div>
       <div id="domains_list" style="margin-top:10px"></div>
     </div>
 
-    <div class="footer" id="footer"></div>
+    <div class="card">
+      <h3>ℹ️ Устройство</h3>
+      <div id="hwid_info" class="hwid-block">Загрузка...</div>
+    </div>
+
+    <div class="card" style="text-align:center">
+      <button class="btn btn-outline" onclick="openLogs()" style="margin:4px">📋 Логи</button>
+      <button class="btn btn-outline" onclick="checkForUpdates()" style="margin:4px">⬆️ Обновить панель</button>
+    </div>
   </div>
 
 <script>
-function normalizeUrl(u){return(u||"").replace(/&sid=[a-zA-Z0-9]+/g,'');}
-let globalNodes=[],activeUrl="",vpnIps=[],domains=[],subExpire=0,subExpireDays=0,subDownload=0,subTotal=0,subTitle='';
-let refreshInterval=600,refreshCountdown=refreshInterval;
+  function normalizeUrl(url){ return (url||"").replace(/&sid=[a-zA-Z0-9]+/g,''); }
 
-const FLAG_MAP={'🇦🇺':'AU','🇦🇹':'AT','🇧🇷':'BR','🇨🇦':'CA','🇨🇭':'CH','🇨🇳':'CN','🇩🇪':'DE','🇪🇸':'ES','🇫🇮':'FI','🇫🇷':'FR','🇬🇧':'GB','🇭🇰':'HK','🇭🇺':'HU','🇮🇱':'IL','🇮🇹':'IT','🇯🇵':'JP','🇰🇷':'KR','🇰🇿':'KZ','🇱🇹':'LT','🇲🇩':'MD','🇳🇱':'NL','🇵🇱':'PL','🇷🇺':'RU','🇹🇷':'TR','🇺🇦':'UA','🇺🇸':'US','🇩🇪':'DE','🇩🇰':'DK','🇸🇪':'SE','🇳🇴':'NO','🇮🇪':'IE','🇵🇹':'PT','🇬🇷':'GR','🇷🇴':'RO','🇧🇬':'BG','🇨🇿':'CZ','🇸🇰':'SK','🇸🇬':'SG','🇮🇳':'IN','🇦🇪':'AE','🇦🇷':'AR','🇲🇽':'MX','🇨🇱':'CL','🇨🇴':'CO','🇵🇪':'PE','🇹🇭':'TH','🇻🇳':'VN','🇮🇩':'ID','🇲🇾':'MY','🇵🇭':'PH','🇹🇼':'TW','🇿🇦':'ZA','🇪🇬':'EG','🇳🇬':'NG','🇰🇪':'KE'};
-function fixFlags(name){
-  return name.replace(/[\uD83C][\uDDE6-\uDDFF][\uD83C][\uDDE6-\uDDFF]/g,function(flag){
-    const code=FLAG_MAP[flag];
-    if(code)return'<span style="display:inline-block;background:rgba(255,255,255,.12);border-radius:4px;padding:1px 5px;font-size:10px;font-weight:800;letter-spacing:1px;vertical-align:middle;margin-right:2px">'+code+'</span>';
-    const cp=Array.from(flag);
-    const c1=String.fromCharCode(cp[0].codePointAt(0)-0x1F1E6+65);
-    const c2=String.fromCharCode(cp[1].codePointAt(0)-0x1F1E6+65);
-    return'<span style="display:inline-block;background:rgba(255,255,255,.12);border-radius:4px;padding:1px 5px;font-size:10px;font-weight:800;letter-spacing:1px;vertical-align:middle;margin-right:2px">'+c1+c2+'</span>';
-  });
-}
+  let globalNodes=[], activeUrl="", vpnIps=[], domains=[];
 
-function showToast(msg,ms=5000){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');clearTimeout(window.__t);window.__t=setTimeout(()=>el.classList.remove('show'),ms);}
-function showLoader(){document.getElementById('loader').classList.add('show');}
-function hideLoader(){document.getElementById('loader').classList.remove('show');}
+  function showToast(msg, ms=6000){
+    const el=document.getElementById('toast');
+    el.textContent=msg;
+    el.style.display='block';
+    clearTimeout(window.__t);
+    window.__t=setTimeout(()=>{ el.style.display='none'; }, ms);
+  }
+  function showLoader(){ document.getElementById('preloader').style.display='flex'; }
+  function hideLoader(){ document.getElementById('preloader').style.display='none'; }
 
-async function api(method,params={}){
-  params.method=method;
-  const qs=Object.keys(params).map(k=>k+'='+encodeURIComponent(params[k])).join('&');
-  const resp=await fetch('/cgi-bin/rpc?'+qs,{cache:'no-store'});
-  const text=await resp.text();
-  let data;
-  try{data=JSON.parse(text);}catch(e){throw new Error("RPC: "+text.slice(0,120));}
-  if(data&&data.status==="error"){throw new Error(data.msg||"Ошибка");}
-  return data;
-}
-
-function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(2)+' GB';}
-function fmtUptime(s){s=Math.floor(s);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);if(d>0)return d+'д '+h+'ч';if(h>0)return h+'ч '+m+'м';return m+'м';}
-
-window.onload=async function(){
-  try{const r=await api('get_sub_url');if(r.url)document.getElementById('sub_url').value=r.url;}catch(e){}
-  try{
-    const r=await api('get_panel_info');
-    if(r.version){
-      document.getElementById('ver_label').textContent='v'+r.version;
-      document.getElementById('footer').innerHTML='<span>Версия '+r.version+'</span><button onclick="checkForUpdates()">🔄 Обновить</button>';
+  async function api(method, params={}){
+    params.method=method;
+    const qs=Object.keys(params).map(k=>k+'='+encodeURIComponent(params[k])).join('&');
+    const resp=await fetch('/cgi-bin/rpc?'+qs, {cache:'no-store'});
+    const text=await resp.text();
+    let data;
+    try{ data=JSON.parse(text); }catch(e){ throw new Error("RPC не-JSON: "+text.slice(0,160)); }
+    if(data && data.status==="error"){
+      const samp = data.sample ? (" | " + String(data.sample).replace(/\s+/g,' ').slice(0,220)) : "";
+      throw new Error((data.msg || "Ошибка") + samp);
     }
-  }catch(e){}
-  await loadData();
-  await loadNetwork();
-  await loadHWID();
-  await loadStats();
-  pingAll();
-  setInterval(loadStats,15000);
-  setInterval(()=>{refreshCountdown--;if(refreshCountdown<=0){refreshCountdown=refreshInterval;silentRefresh();setTimeout(pingAll,3000);}updateTimer();updateExpireWidget();},1000);
-  updateTimer();
-};
-
-function updateTimer(){
-  const m=Math.floor(refreshCountdown/60),s=refreshCountdown%60;
-  document.getElementById('refresh_timer').textContent='Обновление через '+m+':'+String(s).padStart(2,'0');
-}
-
-async function silentRefresh(){
-  try{await api('update_subs',{});await loadData();}catch(e){}
-}
-
-function updateExpireWidget(){
-  const el=document.getElementById('st_expire');
-  if(subExpireDays>0){
-    const d=Math.floor(subExpireDays),h=Math.round((subExpireDays-d)*24);
-    el.textContent=d>0?(d+'д'+(h>0?' '+h+'ч':'')):(h+'ч');
-    if(d<=3)el.style.cssText='color:var(--red)';
-    else if(d<=7)el.style.cssText='color:var(--yellow)';
-    else el.style.cssText='';
-    return;
+    return data;
   }
-  if(subExpire>0){
-    const now=Math.floor(Date.now()/1000);
-    const diff=subExpire-now;
-    if(diff<=0){el.textContent='Истекла';el.style.cssText='color:var(--red)';return;}
-    const d=Math.floor(diff/86400);
-    if(d>30){el.textContent=Math.floor(d/30)+'мес';}
-    else if(d>0){el.textContent=d+'д';}
-    else{const h=Math.floor(diff/3600);el.textContent=h+'ч';}
-    return;
-  }
-  el.textContent='∞';
-}
 
-async function loadStats(){
-  try{
-    const t=await api('get_traffic');
-    const bytes=subDownload>0?subDownload:(t.bytes||0);
-    document.getElementById('st_traffic').textContent=fmtBytes(bytes);
-  }catch(e){}
-  try{
-    const s=await api('get_system');
-    const pct=s.mem_total>0?Math.round((1-s.mem_available/s.mem_total)*100):0;
-    document.getElementById('st_mem').textContent=pct+'%';
-  }catch(e){}
-}
+  window.onload=async function(){
+    try{
+      const r=await api('get_sub_url');
+      if(r.url) document.getElementById('sub_url').value=r.url;
+    }catch(e){ showToast(e.message); }
 
-async function loadHWID(){
-  try{
-    const r=await api('get_hwid');
-    document.getElementById('hwid_val').textContent=r.hwid||'—';
-    document.getElementById('hwid_meta').textContent=(r.device_model||'OpenWrt')+' • '+(r.os_version||'');
-  }catch(e){}
-}
-
-async function loadData(){
-  try{
-    const d=await api('get_nodes');
-    globalNodes=Array.isArray(d.nodes)?d.nodes:[];
-    activeUrl=d.active_url||"";
-    if(d.expire_ts)subExpire=d.expire_ts;
-    if(d.expire_days)subExpireDays=d.expire_days;
-    if(d.sub_download)subDownload=d.sub_download;
-    if(d.sub_total)subTotal=d.sub_total;
-    if(d.sub_title)subTitle=d.sub_title;
-    document.getElementById('sub_meta').innerText=d.updated?("Обновлено: "+d.updated):"Нет данных";
-    let an="Нет подключения";
-    const dot=document.getElementById('status_dot');
-    if(activeUrl&&globalNodes.length){
-      const norm=normalizeUrl(activeUrl.trim());
-      const n=globalNodes.find(x=>normalizeUrl((x.full_url||"").trim())===norm);
-      if(n)an=n.name;else{const m=activeUrl.match(/#(.*)$/);if(m)an=decodeURIComponent(m[1]);}
-      dot.className='dot on';
-    }else{dot.className='dot off';}
-    document.getElementById('active_name').innerText=an;
-    renderNodes();
-    updateExpireWidget();
-  }catch(e){showToast("Ошибка: "+e.message);}
-}
-
-function renderNodes(){
-  const div=document.getElementById("nodes_list");
-  const cnt=document.getElementById('nodes_count');
-  if(cnt)cnt.textContent=globalNodes.length;
-  if(!globalNodes.length){div.innerHTML='<div style="padding:14px 0;text-align:center;color:var(--text-dim)">Список пуст</div>';return;}
-  const normActive=normalizeUrl((activeUrl||"").trim());
-  let h="";
-  globalNodes.forEach((n,i)=>{
-    const isA=normalizeUrl((n.full_url||"").trim())===normActive;
-    const btn=isA?'<span class="btn btn-active btn-sm">✓</span>'
-      :'<button class="btn btn-ghost btn-sm" onclick="connect('+i+')">▶</button>';
-    const pingId='ping_'+i;
-    h+='<div class="list-item"><div class="li-info"><span class="li-name">'+
-      fixFlags(n.name||"Server")+'</span><span class="li-sub">'+(n.type||'')+' • '+(n.host||'')+'</span></div>'+
-      '<div class="li-actions"><span class="ping-badge ping-wait" id="'+pingId+'">...</span>'+btn+'</div></div>';
-  });
-  div.innerHTML=h;
-}
-
-async function doPing(host,elId){
-  const el=document.getElementById(elId);
-  if(!el)return;el.textContent='...';el.className='ping-badge ping-wait';
-  try{
-    const r=await api('ping',{host:host});
-    if(r.status==='ok'){
-      const ms=parseInt(r.time);
-      el.textContent=r.time;
-      el.className='ping-badge '+(ms<100?'ping-good':ms<300?'ping-mid':'ping-bad');
-    }else{el.textContent='✗';el.className='ping-badge ping-bad';}
-  }catch(e){el.textContent='✗';el.className='ping-badge ping-bad';}
-}
-
-async function pingAll(){
-  for(let i=0;i<globalNodes.length;i++){
-    const n=globalNodes[i];
-    doPing(n.host,'ping_'+i);
-    if(i%3===2)await new Promise(r=>setTimeout(r,500));
-  }
-}
-
-async function updateSubs(){
-  showLoader();
-  try{const r=await api('update_subs',{});showToast('✅ Обновлено. Серверов: '+(r.count||"?"));refreshCountdown=refreshInterval;await loadData();}
-  catch(e){showToast("❌ "+e.message,8000);}
-  finally{hideLoader();}
-}
-
-async function saveUrl(){
-  const u=document.getElementById('sub_url').value;if(!u)return;
-  showLoader();
-  try{const r=await api('update_subs',{url:u});showToast('✅ Сохранено. Серверов: '+(r.count||"?"));refreshCountdown=refreshInterval;await loadData();}
-  catch(e){showToast("❌ "+e.message,8000);}
-  finally{hideLoader();}
-}
-
-async function connect(i){
-  if(!confirm('Подключиться к '+globalNodes[i].name+'?'))return;
-  showLoader();
-  try{await api('apply',{node_url:globalNodes[i].full_url});await new Promise(r=>setTimeout(r,2500));await loadData();}
-  catch(e){showToast("❌ "+e.message,8000);}
-  finally{hideLoader();}
-}
-
-async function loadNetwork(){
-  try{
-    const d=await api('get_network');
-    const c=d.clients||[];vpnIps=Array.isArray(d.vpn_ips)?d.vpn_ips:[];domains=Array.isArray(d.domains)?d.domains:[];
-    let vh="";
-    c.forEach(x=>{
-      const iv=vpnIps.includes(x.ip);
-      const btn=iv?'<button class="btn btn-active btn-sm" onclick="toggleVpn(\''+x.ip+'\',\'del\')">✓</button>'
-        :'<button class="btn btn-ghost btn-sm" onclick="toggleVpn(\''+x.ip+'\',\'add\')">+</button>';
-      vh+='<div class="list-item"><div class="li-info"><span class="li-name">'+x.name+'</span><span class="li-sub">'+x.ip+'</span></div><div class="li-actions">'+btn+'</div></div>';
-    });
-    if(!vh)vh='<div style="padding:12px 0;text-align:center;color:var(--text-dim)">Нет устройств</div>';
-    document.getElementById("vpn_list").innerHTML=vh;
-    let dh="";
-    if(domains.length){domains.forEach(dom=>{dh+='<div class="list-item"><div class="li-info"><span class="li-name">'+dom+'</span></div><div class="li-actions"><button class="btn btn-danger btn-sm" onclick="manageDomain(\''+dom+'\',\'del\')">✕</button></div></div>';});}
-    else{dh='<div style="padding:12px 0;text-align:center;color:var(--text-dim)">Список пуст</div>';}
-    document.getElementById('domains_list').innerHTML=dh;
-  }catch(e){showToast("❌ "+e.message);}
-}
-
-async function toggleVpn(ip,a){showLoader();try{await api('manage_vpn',{ip:ip,action:a});await new Promise(r=>setTimeout(r,2000));await loadNetwork();}catch(e){showToast("❌ "+e.message);}finally{hideLoader();}}
-function addManualIp(){const ip=document.getElementById('manual_ip').value;if(ip)toggleVpn(ip,'add');document.getElementById('manual_ip').value="";}
-async function manageDomain(d,a){showLoader();try{await api('manage_domain',{domain:d,action:a});await new Promise(r=>setTimeout(r,2000));await loadNetwork();}catch(e){showToast("❌ "+e.message);}finally{hideLoader();}}
-function addDomain(){const d=document.getElementById('new_domain').value;if(d)manageDomain(d,'add');document.getElementById('new_domain').value="";}
-
-async function checkForUpdates(){
-  showLoader();
-  try{
-    const r=await api('check_for_update');
-    if(r.status==="update_available"){
-      if(confirm('Доступна v'+r.remote_v+' (у вас v'+r.local_v+'). Обновить?')){
-        await api('perform_update');await new Promise(r=>setTimeout(r,4000));location.reload();
+    try{
+      const r=await api('get_panel_info');
+      if(r.version){
+        document.getElementById('ver_line').textContent = 'v' + r.version + ' • ' + (r.device_model||'');
       }
-    }else if(r.status==="up_to_date"){showToast('✅ У вас последняя версия (v'+r.local_v+')');}
-    else{showToast('❌ Ошибка проверки');}
-  }catch(e){showToast("❌ "+e.message);}
-  finally{hideLoader();}
-}
+    }catch(e){ showToast(e.message); }
+
+    try{
+      const r=await api('get_hwid_info');
+      let html = '<b>HWID:</b> '+(r.hwid||'N/A')+'<br>';
+      html += '<b>OS:</b> '+(r.os_type||'?')+' '+(r.os_version||'')+'<br>';
+      html += '<b>Модель:</b> '+(r.device_model||'?');
+      document.getElementById('hwid_info').innerHTML = html;
+    }catch(e){}
+
+    await loadData();
+    await loadNetwork();
+  };
+
+  async function loadData(){
+    try{
+      const d=await api('get_nodes');
+      globalNodes = Array.isArray(d.nodes) ? d.nodes : [];
+      activeUrl=d.active_url||"";
+
+      const meta = d.updated ? ("Обновлено: "+d.updated) : "Нет данных";
+      document.getElementById('sub_meta').innerText = meta;
+
+      // Status indicator
+      const running = d.running;
+      let si = '<span class="status-dot '+(running?'on':'off')+'"></span>';
+
+      let an="Нет подключения";
+      if(activeUrl && globalNodes.length){
+        const norm=normalizeUrl(activeUrl.trim());
+        const n=globalNodes.find(x=>normalizeUrl((x.full_url||"").trim())===norm);
+        if(n) an=n.name;
+        else{
+          const m=activeUrl.match(/#(.*)$/);
+          if(m) an=decodeURIComponent(m[1]);
+        }
+      }
+      document.getElementById('active_name').innerText=an;
+      document.getElementById('status_indicator').innerHTML=si;
+      renderNodes();
+    }catch(e){ showToast("loadData: "+e.message); }
+  }
+
+  function getBadgeClass(transport){
+    switch((transport||'').toLowerCase()){
+      case 'grpc': return 'badge-grpc';
+      case 'xhttp': return 'badge-xhttp';
+      case 'ws': return 'badge-ws';
+      default: return 'badge-tcp';
+    }
+  }
+
+  function renderNodes(){
+    const div=document.getElementById("nodes_list");
+    if(!globalNodes.length){
+      div.innerHTML='<div class="empty-state">Список пуст — добавьте подписку</div>';
+      return;
+    }
+    let h="";
+    const normActive=normalizeUrl((activeUrl||"").trim());
+    globalNodes.forEach((n,i)=>{
+      const isActive = normalizeUrl((n.full_url||"").trim())===normActive;
+      const tl = n.transport_label || (n.transport||'tcp').toUpperCase();
+      const badge = `<span class="transport-badge ${getBadgeClass(n.transport)}">${tl}</span>`;
+      const btn = isActive
+        ? '<button class="btn btn-active">✓ Активен</button>'
+        : `<button class="btn btn-outline" onclick="connect(${i})">Подключить</button>`;
+      h += `<div class="list-row">
+        <div><span class="item-name">${n.name||"Server"}${badge}</span><span class="item-sub">${n.host||""}</span></div>
+        <div>${btn}</div>
+      </div>`;
+    });
+    div.innerHTML=h;
+  }
+
+  async function updateSubs(){
+    showLoader();
+    try{
+      const r=await api('update_subs', {});
+      showToast(`✅ Подписка обновлена. Серверов: ${r.count||"?"}`);
+      await loadData();
+    }catch(e){ showToast("❌ "+e.message, 10000); }
+    finally{ hideLoader(); }
+  }
+
+  async function saveUrl(){
+    const u=document.getElementById('sub_url').value;
+    if(!u) return;
+    showLoader();
+    try{
+      const r=await api('update_subs', {url:u});
+      showToast(`✅ Подписка сохранена. Серверов: ${r.count||"?"}`);
+      await loadData();
+    }catch(e){ showToast("❌ "+e.message, 10000); }
+    finally{ hideLoader(); }
+  }
+
+  async function connect(i){
+    if(!confirm(`Подключиться к ${globalNodes[i].name}?`)) return;
+    showLoader();
+    try{
+      await api('apply',{node_url:globalNodes[i].full_url});
+      await new Promise(r=>setTimeout(r,2500));
+      await loadData();
+    }catch(e){ showToast("❌ "+e.message, 10000); }
+    finally{ hideLoader(); }
+  }
+
+  async function loadNetwork(){
+    try{
+      const d=await api('get_network');
+      const c=d.clients||[];
+      vpnIps=Array.isArray(d.vpn_ips)?d.vpn_ips:[];
+      domains=Array.isArray(d.domains)?d.domains:[];
+
+      let vh="";
+      c.forEach(x=>{
+        const iv=vpnIps.includes(x.ip);
+        const btn = iv ? `<button class="btn btn-active" onclick="toggleVpn('${x.ip}','del')">✓ VPN</button>`
+                       : `<button class="btn btn-outline" onclick="toggleVpn('${x.ip}','add')">Включить</button>`;
+        vh += `<div class="list-row"><div><span class="item-name">${x.name}</span><span class="item-sub">${x.ip}</span></div>${btn}</div>`;
+      });
+      if(vh==="") vh='<div class="empty-state">Нет устройств</div>';
+      document.getElementById("vpn_list").innerHTML=vh;
+
+      let domh="";
+      if(domains.length){
+        domains.forEach(dom=>{
+          domh += `<div class="list-row"><div><span class="item-name">${dom}</span></div><button class="btn btn-danger" onclick="manageDomain('${dom}','del')">✕</button></div>`;
+        });
+      }else{
+        domh='<div class="empty-state">Список пуст</div>';
+      }
+      document.getElementById('domains_list').innerHTML=domh;
+    }catch(e){ showToast("loadNetwork: "+e.message); }
+  }
+
+  async function toggleVpn(ip,a){
+    showLoader();
+    try{
+      await api('manage_vpn',{ip:ip,action:a});
+      await new Promise(r=>setTimeout(r,2000));
+      await loadNetwork();
+    }catch(e){ showToast("VPN: "+e.message, 10000); }
+    finally{ hideLoader(); }
+  }
+
+  function addManualIp(){
+    const ip=document.getElementById('manual_ip').value;
+    if(ip) toggleVpn(ip,'add');
+    document.getElementById('manual_ip').value="";
+  }
+
+  async function manageDomain(d,a){
+    showLoader();
+    try{
+      await api('manage_domain',{domain:d,action:a});
+      await new Promise(r=>setTimeout(r,2000));
+      await loadNetwork();
+    }catch(e){ showToast("Domains: "+e.message, 10000); }
+    finally{ hideLoader(); }
+  }
+
+  function addDomain(){
+    const d=document.getElementById('new_domain').value;
+    if(d) manageDomain(d,'add');
+    document.getElementById('new_domain').value="";
+  }
+
+  // Logs
+  function openLogs(){ document.getElementById('logsModal').style.display='block'; loadLogs(); }
+  function closeLogs(){ document.getElementById('logsModal').style.display='none'; }
+  async function loadLogs(lines){
+    try{
+      const r=await api('get_logs',{lines:lines||50});
+      document.getElementById('logs_text').textContent = r.logs || "Логи пусты";
+      // scroll to bottom
+      const el=document.getElementById('logs_text');
+      el.scrollTop=el.scrollHeight;
+    }catch(e){ document.getElementById('logs_text').textContent="Ошибка: "+e.message; }
+  }
+
+  async function checkForUpdates(){
+    showLoader();
+    try{
+      const r=await api('check_for_update');
+      if(r.status==="update_available"){
+        if(confirm(`Доступна v${r.remote_v} (у вас ${r.local_v}). Обновить?`)){
+          await api('perform_update');
+          await new Promise(r=>setTimeout(r,4000));
+          location.reload();
+        }
+      }else if(r.status==="up_to_date"){
+        showToast(`✅ Последняя версия (${r.local_v}).`);
+      }else{
+        showToast("Ошибка проверки обновлений.");
+      }
+    }catch(e){ showToast("Updates: "+e.message, 10000); }
+    finally{ hideLoader(); }
+  }
 </script>
 </body>
 </html>
-FRONTEND_EOF
+EOF
 
-# 7) sub_refresh + autoupdate + cron
-echo "[7/8] Настройка автообновления подписки и панели..."
-
-# Sub refresh script (every 10 min)
-cat <<'SUBREF_EOF' > /etc/podkop_data/sub_refresh.sh
+# 7) subscription auto-update every 5 min
+echo "[7/8] Настройка автообновления подписки (каждые 5 мин)..."
+cat <<'AEOF' > /etc/podkop_data/autoupdate_sub.sh
 #!/bin/sh
-# Silent subscription refresh with HWID headers
-URL=$(uci -q get podkop_subs.config.url)
+# Auto-update subscription every 5 minutes
+URL="$(uci -q get podkop_subs.config.url)"
 [ -z "$URL" ] && exit 0
 
-HWID=$(cat /etc/podkop_data/hwid 2>/dev/null || echo "RIFT-unknown")
-OSVER=$(grep 'DISTRIB_RELEASE' /etc/openwrt_release 2>/dev/null | cut -d"'" -f2)
-MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo "OpenWrt Router")
-VER=$(cat /etc/podkop_data/version 2>/dev/null || echo "3.0")
+HWID="$(cat /etc/podkop_data/hwid 2>/dev/null)"
+MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo 'OpenWrt')"
+OSVER="$(cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_RELEASE | cut -d"'" -f2)"
 BODY="/tmp/podkop_sub_auto.body"
+ERR="/tmp/podkop_sub_auto.err"
 
+# Fetch with HWID headers
 if command -v uclient-fetch >/dev/null 2>&1; then
   uclient-fetch -q -O "$BODY" \
+    --header="User-Agent: v2rayNG/1.8.19" \
     --header="x-hwid: $HWID" \
-    --header="x-device-os: OpenWrt" \
+    --header="x-device-os: OpenWRT" \
     --header="x-ver-os: $OSVER" \
     --header="x-device-model: $MODEL" \
-    --header="User-Agent: RIFT-Panel/$VER" \
-    "$URL" 2>/dev/null
+    "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 else
-  wget -q -T 20 -O "$BODY" \
+  wget -q -T 25 \
+    -U "v2rayNG/1.8.19" \
     --header="x-hwid: $HWID" \
-    --header="x-device-os: OpenWrt" \
+    --header="x-device-os: OpenWRT" \
     --header="x-ver-os: $OSVER" \
     --header="x-device-model: $MODEL" \
-    --header="User-Agent: RIFT-Panel/$VER" \
-    "$URL" 2>/dev/null
+    -O "$BODY" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 fi
 
-[ ! -s "$BODY" ] && rm -f "$BODY" && exit 0
+RAW="$(cat "$BODY" 2>/dev/null)"
+[ -z "$RAW" ] && { rm -f "$BODY" "$ERR"; exit 0; }
 
-# Try to call the panel RPC to parse nodes (reuses existing logic)
-# Alternatively parse inline with lua
-lua -e '
-function trim(s) return (tostring(s or ""):gsub("^%s*(.-)%s*$", "%1")) end
-function shq(s) s=tostring(s or "") return "\x27"..s:gsub("\x27", "\x27\\\x27\x27").."\x27" end
-function exec_read(cmd) local h=io.popen(cmd) local r=h:read("*a") h:close() return r and trim(r) or "" end
-function serialize(val)
-  local t=type(val)
-  if t=="table" then
-    local parts={}
-    for k,v in pairs(val) do
-      local key=(type(k)=="number") and "" or ("[\""..k.."\"]=" )
-      parts[#parts+1]=key..serialize(v)
-    end
-    return "{"..table.concat(parts,",").."}"
-  elseif t=="string" then return string.format("%q",val)
-  else return tostring(val) end
-end
-local function b64fix(s) s=(s or ""):gsub("%s+",""):gsub("-","+"):gsub("_","/") while(#s%4)~=0 do s=s.."=" end return s end
-local PROTOS={"vless://","trojan://","ss://","vmess://","hysteria2://","tuic://"}
-local function extract(text)
-  local out={}
-  if not text then return out end
-  for line in (text.."\n"):gmatch("([^\n]+)") do
-    line=trim(line)
-    if line~="" then
-      for _,pr in ipairs(PROTOS) do
-        if line:sub(1,#pr)==pr then out[#out+1]=line break end
-      end
-    end
-  end
-  return out
-end
-local function tonode(l)
-  local p=(l:match("^(%w+)://") or "LINK"):upper()
-  local ne=l:match("#(.+)$")
-  local nm="Server"
-  if ne then nm=ne:gsub("%%(%x%x)",function(h)return string.char(tonumber(h,16))end) end
-  local ho=l:match("@(.-):" ) or l:match("://([^/:#%%?]+)") or "unknown"
-  local ti=p if l:match("security=reality") then ti="Reality" end
-  return {name=nm,host=ho,type=ti,full_url=l}
-end
-local function should_skip(name) return name:find("\208\158\208\177\209\133\208\190\208\180 \208\145\208\161",1,true) end
-local f=io.open("/tmp/podkop_sub_auto.body","r")
-if not f then os.exit(0) end
-local raw=f:read("*a") f:close()
+# Try base64 decode
+DECODED=""
+if ! echo "$RAW" | grep -q "://"; then
+  SAFE="$(echo "$RAW" | tr -d '\n\r\t ' | sed 's/-/+/g;s/_/\//g')"
+  PAD=$(( (4 - ${#SAFE} % 4) % 4 ))
+  while [ "$PAD" -gt 0 ]; do SAFE="${SAFE}="; PAD=$((PAD-1)); done
+  DECODED="$(printf '%s' "$SAFE" | base64 -d 2>/dev/null)"
+fi
+
+TEXT="${DECODED:-$RAW}"
+
+if ! echo "$TEXT" | grep -q "://"; then
+  rm -f "$BODY" "$ERR"
+  exit 0
+fi
+
+# Count nodes
+COUNT=$(echo "$TEXT" | grep -c "://")
+
+# Write nodes.lua using Lua for proper escaping
+lua -e "
+local text=[=[$TEXT]=]
 local nodes={}
-local seen={}
-local function add_links(text)
-  local lnks=extract(text)
-  for _,u in ipairs(lnks) do
-    local n=tonode(u)
-    if not should_skip(n.name) and not seen[n.host] then
-      seen[n.host]=true
-      nodes[#nodes+1]=n
+for line in text:gmatch('[^\n]+') do
+  local proto = line:match('^(%w+)://')
+  if proto then
+    local ne = line:match('#(.+)$')
+    local name = 'Server'
+    if ne then name = ne:gsub('%%(%x%x)',function(h)return string.char(tonumber(h,16))end) end
+    local host = line:match('@(.-)[:?]') or line:match('://([^/:#?]+)') or 'unknown'
+    local transport = line:match('[?&]type=([^&#]*)') or 'tcp'
+    local security = line:match('[?&]security=([^&#]*)') or ''
+    local transport_label = transport:upper()
+    if transport == 'grpc' then transport_label = 'gRPC'
+    elseif transport == 'xhttp' then transport_label = 'XHTTP' end
+    local ti = proto:upper()
+    if security == 'reality' then ti = 'Reality' end
+    local sn = line:match('[?&]serviceName=([^&#]*)') or ''
+    local path = line:match('[?&]path=([^&#]*)') or ''
+    local mode = line:match('[?&]mode=([^&#]*)') or ''
+    local flow = line:match('[?&]flow=([^&#]*)') or ''
+    nodes[#nodes+1]={
+      name=name,host=host,type=ti,
+      transport=transport,transport_label=transport_label,
+      security=security,service_name=sn,path=path,mode=mode,flow=flow,
+      full_url=line
+    }
+  end
+end
+local function ser(v)
+  local t=type(v)
+  if t=='table' then
+    local p={}
+    for k,vv in pairs(v) do
+      local key=(type(k)=='number') and '' or ('[\"'..k..'\"]='  )
+      p[#p+1]=key..ser(vv)
     end
-  end
+    return '{'..table.concat(p,',')..'}'
+  elseif t=='string' then return string.format('%q',v)
+  else return tostring(v) end
 end
-add_links(raw)
-if #nodes==0 then
-  local t=raw:gsub("%s+","")
-  if #t>=16 and t:match("^[%w%+/%=_%-%s]+$") then
-    local fixed=b64fix(t)
-    local fb=io.open("/tmp/rift_b64.tmp","w")
-    if fb then fb:write(fixed) fb:close() end
-    os.execute("base64 -d /tmp/rift_b64.tmp > /tmp/rift_dec.tmp 2>/dev/null")
-    local fd=io.open("/tmp/rift_dec.tmp","r")
-    if fd then local dec=fd:read("*a") fd:close() if dec and #dec>0 then add_links(dec) end end
-    os.execute("rm -f /tmp/rift_b64.tmp /tmp/rift_dec.tmp")
-  end
-end
-if #nodes>0 then
-  local db={expire="Нет данных",updated=os.date("%Y-%m-%d %H:%M:%S"),nodes=nodes}
-  local out=io.open("/etc/podkop_data/nodes.lua","w")
-  if out then out:write("return "..serialize(db)) out:close() end
-end
-' 2>/dev/null
+local db={expire='Нет данных',updated=os.date('%Y-%m-%d %H:%M:%S'),nodes=nodes}
+local f=io.open('/etc/podkop_data/nodes.lua','w')
+if f then f:write('return '..ser(db)); f:close() end
+" 2>/dev/null
 
-rm -f "$BODY"
-SUBREF_EOF
-chmod +x /etc/podkop_data/sub_refresh.sh
+# Cleanup temp files
+rm -f "$BODY" "$ERR"
 
-# Panel autoupdate script (daily)
-cat <<'AUTOUPD_EOF' > /etc/podkop_data/autoupdate.sh
+logger -t "rift-panel" "Subscription updated: $COUNT nodes"
+AEOF
+chmod +x /etc/podkop_data/autoupdate_sub.sh
+
+# Panel auto-update (daily)
+cat <<'PEOF' > /etc/podkop_data/autoupdate_panel.sh
 #!/bin/sh
-REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
+REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 VERSION_FILE="/etc/podkop_data/version"
 TMP="/tmp/rift_remote.sh"
+
 [ -f "$VERSION_FILE" ] || exit 0
 LOCAL_VERSION="$(cat "$VERSION_FILE" 2>/dev/null)"
+
 if command -v uclient-fetch >/dev/null 2>&1; then
-  uclient-fetch -q -O "$TMP" "$REMOTE_SCRIPT_URL" >/dev/null 2>&1 || exit 0
+  uclient-fetch -q -O "$TMP" "$REMOTE_SCRIPT_URL" >/dev/null 2>&1 || { rm -f "$TMP"; exit 0; }
 else
-  wget -q -O "$TMP" "$REMOTE_SCRIPT_URL" >/dev/null 2>&1 || exit 0
+  wget -q -O "$TMP" "$REMOTE_SCRIPT_URL" >/dev/null 2>&1 || { rm -f "$TMP"; exit 0; }
 fi
+
 REMOTE_VERSION="$(sed -n 's/^PANEL_VERSION="\([^"]*\)".*/\1/p' "$TMP" | head -n1)"
+
 if [ -n "$REMOTE_VERSION" ] && [ -n "$LOCAL_VERSION" ] && [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
   sh "$TMP" >/dev/null 2>&1
 fi
 rm -f "$TMP"
-AUTOUPD_EOF
-chmod +x /etc/podkop_data/autoupdate.sh
+PEOF
+chmod +x /etc/podkop_data/autoupdate_panel.sh
 
-# 8) cron setup
+# 8) cron jobs
 echo "[8/8] Настройка cron задач..."
-# Remove old jobs
-(crontab -l 2>/dev/null | grep -Fv "/etc/podkop_data/autoupdate.sh" | grep -Fv "/etc/podkop_data/sub_refresh.sh") > /tmp/cron_clean 2>/dev/null
-echo "0 4 * * * /etc/podkop_data/autoupdate.sh" >> /tmp/cron_clean
-echo "*/10 * * * * /etc/podkop_data/sub_refresh.sh" >> /tmp/cron_clean
-crontab /tmp/cron_clean
-rm -f /tmp/cron_clean
+# Remove old cron entries
+(crontab -l 2>/dev/null | grep -Fv "/etc/podkop_data/autoupdate" | grep -Fv "autoupdate_sub" | grep -Fv "autoupdate_panel") | crontab -
+
+# Add new cron entries
+CRON_SUB="*/5 * * * * /etc/podkop_data/autoupdate_sub.sh"
+CRON_PANEL="13 4 * * * /etc/podkop_data/autoupdate_panel.sh"
+(crontab -l 2>/dev/null; echo "$CRON_SUB"; echo "$CRON_PANEL") | crontab -
 
 # finish
 chmod +x /www/podkop_panel/cgi-bin/rpc
@@ -1146,8 +1124,8 @@ ROUTER_IP="$(uci -q get network.lan.ipaddr)"
 [ -z "$ROUTER_IP" ] && ROUTER_IP="192.168.1.1"
 
 echo "================================================="
-echo "✅ ГОТОВО! RIFT Panel v${PANEL_VERSION} установлена."
-echo "🔑 HWID: $(cat /etc/podkop_data/hwid 2>/dev/null)"
-echo "🌐 Доступ: http://${ROUTER_IP}:2017"
-echo "🔄 Подписка обновляется каждые 10 минут"
+echo "ГОТОВО! RIFT Panel v${PANEL_VERSION} установлена."
+echo "Доступ: http://${ROUTER_IP}:2017"
+echo "HWID: $(cat /etc/podkop_data/hwid 2>/dev/null)"
+echo "Автообновление подписки: каждые 5 минут"
 echo "================================================="
