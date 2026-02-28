@@ -2,7 +2,7 @@
 # === RIFT PANEL INSTALLER & UPDATER (V3.3) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.3"
+PANEL_VERSION="3.4"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 # === MENU: detect existing installation ===
