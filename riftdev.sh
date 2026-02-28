@@ -2,7 +2,7 @@
 # === RIFT PANEL INSTALLER & UPDATER (V3.1) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.1"
+PANEL_VERSION="3.2"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 # === MENU: detect existing installation ===
@@ -266,6 +266,20 @@ local function fetch_to_file(url, out, err, extra_headers)
   return (rc==0) or (rc==true)
 end
 
+-- Fetch and capture response headers (for subscription info)
+local function fetch_with_headers(url, out, hdr_file, extra_headers)
+  exec_silent("rm -f "..out.." "..hdr_file)
+  local ua = "v2rayNG/1.8.19"
+  local hdr = ""
+  if extra_headers then
+    for _,h in ipairs(extra_headers) do hdr = hdr .. " --header=" .. shq(h) end
+  end
+  -- wget -S writes headers to stderr
+  local cmd = "wget -q -S -T 25 -U "..shq(ua)..hdr.." -O "..out.." "..shq(url).." 2>"..hdr_file
+  local rc = os.execute(cmd)
+  return (rc==0) or (rc==true)
+end
+
 local function smart_fetch(url, out, err)
   local hwid = get_hwid()
   local model = get_device_model()
@@ -279,6 +293,61 @@ local function smart_fetch(url, out, err)
   local ok = fetch_to_file(url, out, err, headers)
   if not ok then ok = fetch_to_file(url, out, err) end
   return ok
+end
+
+local function smart_fetch_with_headers(url, out, hdr_file)
+  local hwid = get_hwid()
+  local model = get_device_model()
+  local osver = get_os_version()
+  local headers = {
+    "x-hwid: " .. hwid,
+    "x-device-os: OpenWRT",
+    "x-ver-os: " .. osver,
+    "x-device-model: " .. model
+  }
+  local ok = fetch_with_headers(url, out, hdr_file, headers)
+  if not ok then ok = fetch_with_headers(url, out, hdr_file) end
+  return ok
+end
+
+-- Extract subscription info from saved headers
+local function extract_sub_info(hdr_file)
+  local info = {expire="", title="", interval=""}
+  local raw = exec_read("cat "..hdr_file.." 2>/dev/null")
+  -- profile-title (base64 encoded)
+  local pt = raw:match("profile%-title:%s*base64:([%w%+/=]+)")
+  if pt then
+    local decoded = exec_read("printf %s "..shq(pt).." | base64 -d 2>/dev/null")
+    info.title = decoded or ""
+    -- extract expire like "29D,22H" or time info
+    local expire_match = decoded:match("(%d+[DdДд][%s,]*%d*[HhЧч]*)")
+    if expire_match then info.expire = expire_match end
+  end
+  -- subscription-userinfo header
+  local sui = raw:match("subscription%-userinfo:%s*(.-)%s*$")
+  if sui then
+    local exp_ts = sui:match("expire=(%d+)")
+    if exp_ts then
+      info.expire_ts = tonumber(exp_ts)
+      local diff = tonumber(exp_ts) - os.time()
+      if diff > 0 then
+        local days = math.floor(diff/86400)
+        local hours = math.floor((diff%86400)/3600)
+        info.expire = days.."д "..hours.."ч"
+      else
+        info.expire = "Истекла"
+      end
+    end
+    local dl = sui:match("download=(%d+)")
+    local total = sui:match("total=(%d+)")
+    if dl and total then
+      info.traffic_used = math.floor(tonumber(dl)/1073741824*100)/100
+      info.traffic_total = math.floor(tonumber(total)/1073741824*100)/100
+    end
+  end
+  local pi = raw:match("profile%-update%-interval:%s*(%d+)")
+  if pi then info.interval = pi end
+  return info
 end
 
 local qs=os.getenv("QUERY_STRING") or ""
@@ -336,8 +405,11 @@ local function link_to_node(line)
   if security == "reality" then ti = "Reality" end
 
   local transport_label = transport:upper()
+  local unsupported = false
   if transport == "grpc" then transport_label = "gRPC"
-  elseif transport == "xhttp" then transport_label = "XHTTP"
+  elseif transport == "xhttp" or transport == "splithttp" then
+    transport_label = "XHTTP"
+    unsupported = true -- sing-box does not support xhttp
   elseif transport == "ws" then transport_label = "WS"
   end
 
@@ -357,6 +429,7 @@ local function link_to_node(line)
     path=path,
     mode=mode,
     flow=flow,
+    unsupported=unsupported,
     full_url=line
   }
 end
@@ -460,6 +533,9 @@ if method=="get_nodes" then
   print(to_json({
     nodes=db.nodes,
     expire=db.expire or "Нет данных",
+    sub_title=db.sub_title or "",
+    sub_expire=db.sub_expire or "",
+    sub_traffic=db.sub_traffic or "",
     updated=db.updated or "Никогда",
     active_url=dp,
     running=rn
@@ -479,14 +555,17 @@ if method=="update_subs" then
   exec_silent("uci commit podkop_subs")
 
   local body="/tmp/podkop_sub.body"
-  local err="/tmp/podkop_sub.err"
-  local ok = smart_fetch(url, body, err)
+  local hdr_file="/tmp/podkop_sub.hdr"
+  local ok = smart_fetch_with_headers(url, body, hdr_file)
   local raw = exec_read("cat "..body.." 2>/dev/null")
 
   if (not ok) or raw=="" then
     print(to_json({status="error", msg="Ошибка загрузки подписки"}))
-    os.remove(body); os.remove(err); os.exit(0)
+    os.remove(body); os.remove(hdr_file); os.exit(0)
   end
+
+  -- Extract subscription info from headers
+  local sub_info = extract_sub_info(hdr_file)
 
   -- try raw first, then base64
   local nodes = parse_nodes(raw)
@@ -497,19 +576,32 @@ if method=="update_subs" then
 
   if #nodes == 0 then
     print(to_json({status="error", msg="Серверы не найдены"}))
-    os.remove(body); os.remove(err); os.exit(0)
+    os.remove(body); os.remove(hdr_file); os.exit(0)
   end
 
-  local db={expire="Нет данных", updated=os.date("%Y-%m-%d %H:%M:%S"), nodes=nodes}
+  -- Build traffic string
+  local traffic_str = ""
+  if sub_info.traffic_used then
+    traffic_str = sub_info.traffic_used.." / "..sub_info.traffic_total.." GB"
+  end
+
+  local db={
+    expire=sub_info.expire ~= "" and sub_info.expire or "Нет данных",
+    sub_title=sub_info.title or "",
+    sub_expire=sub_info.expire or "",
+    sub_traffic=traffic_str,
+    updated=os.date("%Y-%m-%d %H:%M:%S"),
+    nodes=nodes
+  }
   local f=io.open("/etc/podkop_data/nodes.lua","w")
   if f then
     f:write("return "..serialize(db))
     f:close()
-    print(to_json({status="ok", count=#nodes, expire=db.expire}))
+    print(to_json({status="ok", count=#nodes, expire=db.expire, sub_title=db.sub_title, sub_traffic=traffic_str}))
   else
     print('{"status":"error","msg":"Ошибка записи"}')
   end
-  os.remove(body); os.remove(err); os.exit(0)
+  os.remove(body); os.remove(hdr_file); os.exit(0)
 end
 
 if method=="apply" then
@@ -528,19 +620,42 @@ end
 if method=="ping" then
   local host=params.host
   if host and host:match("^[a-zA-Z0-9%.%-]+$") then
-    local res=exec_silent("ping -c 1 -W 1 "..host)
+    local res=exec_silent("ping -c 1 -W 2 "..host)
     local ms="timeout"
     local s="fail"
     if (res==0)or(res==true) then
-      local out=exec_read("ping -c 1 -W 1 "..host.." | grep 'seq=0'")
+      local out=exec_read("ping -c 1 -W 2 "..host.." 2>/dev/null")
       local val=out:match("time=([%d%.]+)")
       if val then ms=math.floor(tonumber(val)).." ms" end
       s="ok"
     end
-    print(to_json({status=s,time=ms}))
+    print(to_json({status=s,time=ms,host=host}))
   else
     print('{"status":"error","msg":"bad host"}')
   end
+  os.exit(0)
+end
+
+if method=="ping_all" then
+  local s,db=pcall(dofile,"/etc/podkop_data/nodes.lua")
+  if not s or type(db)~="table" then db={nodes={}} end
+  local results={}
+  local done_hosts={}
+  for _,node in ipairs(db.nodes or {}) do
+    local h=node.host
+    if h and h~="" and not done_hosts[h] and h:match("^[a-zA-Z0-9%.%-]+$") then
+      done_hosts[h]=true
+      local res=exec_silent("ping -c 1 -W 2 "..h)
+      local ms="timeout"
+      if (res==0)or(res==true) then
+        local out=exec_read("ping -c 1 -W 2 "..h.." 2>/dev/null")
+        local val=out:match("time=([%d%.]+)")
+        if val then ms=math.floor(tonumber(val)).." ms" end
+      end
+      results[h]=ms
+    end
+  end
+  print(to_json({status="ok",pings=results}))
   os.exit(0)
 end
 
@@ -657,8 +772,12 @@ cat <<'EOF' > /www/podkop_panel/index.html
     .transport-badge{display:inline-block;font-size:9px;font-weight:800;padding:2px 6px;border-radius:6px;margin-left:6px;vertical-align:middle}
     .badge-tcp{background:rgba(0,212,255,.12);color:var(--accent)}
     .badge-grpc{background:rgba(255,183,77,.12);color:var(--orange)}
-    .badge-xhttp{background:rgba(0,230,118,.12);color:var(--green)}
+    .badge-xhttp{background:rgba(255,82,82,.12);color:var(--red);text-decoration:line-through}
     .badge-ws{background:rgba(156,39,176,.12);color:#CE93D8}
+    .ping-text{font-size:10px;color:var(--text-sec);margin-top:1px;display:block}
+    .ping-ok{color:var(--green)}
+    .ping-bad{color:var(--red)}
+    .sub-info{font-size:11px;color:rgba(255,255,255,.6);margin-top:4px;display:block}
     .input-group{display:flex;gap:8px;margin-top:12px}
     input[type=text]{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;width:100%;font-size:12px;font-family:inherit;outline:none}
     input[type=text]:focus{border-color:var(--accent)}
@@ -706,7 +825,10 @@ cat <<'EOF' > /www/podkop_panel/index.html
       <button class="btn btn-full" style="background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.2)" onclick="updateSubs()">🔄 Обновить подписку</button>
     </div>
     <div class="card">
-      <h3>🌐 Серверы</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3>🌐 Серверы</h3>
+        <button class="btn btn-outline" onclick="pingAll()" style="font-size:11px;padding:4px 10px" id="pingBtn">📶 Пинг</button>
+      </div>
       <div id="nodes_list"></div>
       <div class="input-group">
         <input type="text" id="sub_url" placeholder="Ссылка на подписку...">
@@ -741,7 +863,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
 <script>
   function esc(s){let d=document.createElement('div');d.textContent=s;return d.innerHTML;}
   function normalizeUrl(url){return(url||"").replace(/#.*$/,'');}
-  let globalNodes=[],activeUrl="",vpnIps=[],domains=[];
+  let globalNodes=[],activeUrl="",vpnIps=[],domains=[],pingData={};
   function showToast(msg,ms=6000){const el=document.getElementById('toast');el.textContent=msg;el.style.display='block';clearTimeout(window.__t);window.__t=setTimeout(()=>{el.style.display='none';},ms);}
   function showLoader(){document.getElementById('preloader').style.display='flex';}
   function hideLoader(){document.getElementById('preloader').style.display='none';}
@@ -766,7 +888,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
       const d=await api('get_nodes');
       globalNodes=Array.isArray(d.nodes)?d.nodes:[];
       activeUrl=d.active_url||"";
-      document.getElementById('sub_meta').innerText=d.updated?("Обновлено: "+d.updated):"Нет данных";
+      let metaParts=[];if(d.updated)metaParts.push('Обновлено: '+d.updated);if(d.sub_expire)metaParts.push('⏳ '+d.sub_expire);if(d.sub_traffic)metaParts.push('📊 '+d.sub_traffic);document.getElementById('sub_meta').innerText=metaParts.join(' • ')||'Нет данных';
       const running=d.running;
       document.getElementById('status_indicator').innerHTML='<span class="status-dot '+(running?'on':'off')+'"></span>';
       let an="Нет подключения";
@@ -780,7 +902,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
       renderNodes();
     }catch(e){showToast("loadData: "+e.message);}
   }
-  function getBadge(t){switch((t||'').toLowerCase()){case 'grpc':return 'badge-grpc';case 'xhttp':return 'badge-xhttp';case 'ws':return 'badge-ws';default:return 'badge-tcp';}}
+  function getBadge(t){switch((t||'').toLowerCase()){case 'grpc':return 'badge-grpc';case 'xhttp':case 'splithttp':return 'badge-xhttp';case 'ws':return 'badge-ws';default:return 'badge-tcp';}}
   function renderNodes(){
     const div=document.getElementById("nodes_list");
     if(!globalNodes.length){div.innerHTML='<div class="empty-state">Список пуст — добавьте подписку</div>';return;}
@@ -788,15 +910,30 @@ cat <<'EOF' > /www/podkop_panel/index.html
     globalNodes.forEach((n,i)=>{
       const isA=normalizeUrl((n.full_url||"").trim())===normA;
       const tl=n.transport_label||(n.transport||'tcp').toUpperCase();
-      const badge=`<span class="transport-badge ${getBadge(n.transport)}">${esc(tl)}</span>`;
-      const btn=isA?'<button class="btn btn-active">✓ Активен</button>':`<button class="btn btn-outline" onclick="connect(${i})">Подключить</button>`;
-      h+=`<div class="list-row"><div class="node-info"><span class="item-name">${esc(n.name||"Server")}${badge}</span><span class="item-sub">${esc(n.host||"")}</span></div><div class="node-actions">${btn}</div></div>`;
+      const isXhttp=n.unsupported||((n.transport||'').toLowerCase()==='xhttp');
+      const badge=`<span class="transport-badge ${getBadge(n.transport)}">${esc(tl)}${isXhttp?' ⚠️':''}</span>`;
+      let btn;
+      if(isA) btn='<button class="btn btn-active">✓ Активен</button>';
+      else if(isXhttp) btn='<button class="btn btn-danger" title="sing-box не поддерживает XHTTP" disabled>⚠️</button>';
+      else btn=`<button class="btn btn-outline" onclick="connect(${i})">Подключить</button>`;
+      const p=pingData[n.host];
+      const pingHtml=p?`<span class="ping-text ${p==='timeout'?'ping-bad':'ping-ok'}">${p}</span>`:'';
+      h+=`<div class="list-row"><div class="node-info"><span class="item-name">${esc(n.name||"Server")}${badge}</span><span class="item-sub">${esc(n.host||"")}${pingHtml}</span></div><div class="node-actions">${btn}</div></div>`;
     });
     div.innerHTML=h;
   }
   async function updateSubs(){showLoader();try{const r=await api('update_subs',{});showToast(`✅ Обновлено: ${r.count||"?"} серверов`);await loadData();}catch(e){showToast("❌ "+e.message,10000);}finally{hideLoader();}}
   async function saveUrl(){const u=document.getElementById('sub_url').value;if(!u)return;showLoader();try{const r=await api('update_subs',{url:u});showToast(`✅ Сохранено: ${r.count||"?"} серверов`);await loadData();}catch(e){showToast("❌ "+e.message,10000);}finally{hideLoader();}}
-  async function connect(i){if(!confirm(`Подключиться к ${globalNodes[i].name}?`))return;showLoader();try{await api('apply',{node_url:globalNodes[i].full_url});await new Promise(r=>setTimeout(r,2500));await loadData();}catch(e){showToast("❌ "+e.message,10000);}finally{hideLoader();}}
+  async function connect(i){
+    const n=globalNodes[i];
+    if(n.unsupported||((n.transport||'').toLowerCase()==='xhttp')){showToast('⚠️ XHTTP не поддерживается sing-box. Используйте gRPC или TCP.',8000);return;}
+    if(!confirm(`Подключиться к ${n.name}?`))return;
+    showLoader();try{await api('apply',{node_url:n.full_url});await new Promise(r=>setTimeout(r,2500));await loadData();}catch(e){showToast("❌ "+e.message,10000);}finally{hideLoader();}}
+  async function pingAll(){
+    const btn=document.getElementById('pingBtn');btn.textContent='⏳...';btn.disabled=true;
+    try{const r=await api('ping_all');if(r.pings){pingData=r.pings;renderNodes();showToast('📶 Пинг обновлён');}}catch(e){showToast('Ping: '+e.message);}
+    finally{btn.textContent='📶 Пинг';btn.disabled=false;}
+  }
   async function loadNetwork(){
     try{
       const d=await api('get_network');const c=d.clients||[];vpnIps=Array.isArray(d.vpn_ips)?d.vpn_ips:[];domains=Array.isArray(d.domains)?d.domains:[];
@@ -813,7 +950,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
   function openLogs(){document.getElementById('logsModal').style.display='block';loadLogs();}
   function closeLogs(){document.getElementById('logsModal').style.display='none';}
   async function loadLogs(lines){try{const r=await api('get_logs',{lines:lines||50});const el=document.getElementById('logs_text');el.textContent=r.logs||"Логи пусты";el.scrollTop=el.scrollHeight;}catch(e){document.getElementById('logs_text').textContent="Ошибка: "+e.message;}}
-  async function checkForUpdates(){showLoader();try{const r=await api('check_for_update');if(r.status==="update_available"){if(confirm(`Доступна v${r.remote_v} (у вас ${r.local_v}). Обновить?`)){await api('perform_update');await new Promise(r=>setTimeout(r,4000));location.reload();}}else showToast(`✅ Последняя версия (${r.local_v}).`);}catch(e){showToast("Updates: "+e.message);}finally{hideLoader();}}
+  async function checkForUpdates(){showLoader();try{const r=await api('check_for_update');if(r.status==='update_available'){if(confirm(`Доступна v${r.remote_v} (у вас ${r.local_v}). Обновить?`)){await api('perform_update');await new Promise(r=>setTimeout(r,4000));location.reload();}}else showToast(`✅ Последняя версия (${r.local_v}).`);}catch(e){showToast('Updates: '+e.message);}finally{hideLoader();}}
 </script>
 </body>
 </html>
