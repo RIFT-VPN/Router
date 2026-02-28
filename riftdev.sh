@@ -1,5 +1,5 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.3) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.4) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
 PANEL_VERSION="3.4"
@@ -314,8 +314,9 @@ end
 local function extract_sub_info(hdr_file)
   local info = {expire="", title="", interval=""}
   local raw = exec_read("cat "..hdr_file.." 2>/dev/null")
+  raw = raw:gsub("\r", "")  -- strip CR from curl output
   -- profile-title (base64 encoded)
-  local pt = raw:match("profile%-title:%s*base64:([%w%+/=]+)")
+  local pt = raw:match("profile%-title:%s*base64:([A-Za-z0-9%+/=]+)")
   if pt then
     local decoded = exec_read("printf %s "..shq(pt).." | base64 -d 2>/dev/null")
     info.title = decoded or ""
@@ -569,10 +570,10 @@ if method=="update_subs" then
     os.remove(body); os.remove(err); os.exit(0)
   end
 
-  -- Try to capture headers separately (optional, may fail on BusyBox)
+  -- Capture headers with curl (BusyBox wget doesn't support -S)
   local hdr_file="/tmp/podkop_sub.hdr"
   local sub_info = {expire="", title="", interval=""}
-  exec_silent("wget -q -S -T 10 -O /dev/null "..shq(url).." 2>"..hdr_file)
+  os.execute("curl -sI "..shq(url).." >"..hdr_file.." 2>/dev/null")
   local hdr_raw = exec_read("cat "..hdr_file.." 2>/dev/null")
   if hdr_raw ~= "" then
     sub_info = extract_sub_info(hdr_file)
