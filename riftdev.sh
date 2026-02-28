@@ -1,8 +1,8 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.4) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.5) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
 
-PANEL_VERSION="3.4"
+PANEL_VERSION="3.5"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
 
 # === MENU: detect existing installation ===
@@ -788,6 +788,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     .badge-xhttp{background:rgba(255,82,82,.12);color:var(--red);text-decoration:line-through}
     .badge-ws{background:rgba(156,39,176,.12);color:#CE93D8}
     .ping-text{font-size:10px;color:var(--text-sec);margin-top:1px;display:block}
+    .list-row.active-row{background:linear-gradient(135deg,rgba(0,102,255,.12),rgba(0,212,255,.08));border:1px solid rgba(0,212,255,.25);border-radius:12px;margin:4px -8px;padding:12px 8px}
     .ping-ok{color:var(--green)}
     .ping-bad{color:var(--red)}
     .sub-info{font-size:11px;color:rgba(255,255,255,.6);margin-top:4px;display:block}
@@ -832,9 +833,10 @@ cat <<'EOF' > /www/podkop_panel/index.html
     </header>
     <div class="card active-card">
       <h3>АКТИВНОЕ ПОДКЛЮЧЕНИЕ</h3>
-      <span id="status_indicator"></span>
       <span class="server-big" id="active_name">...</span>
-      <span class="server-meta" id="sub_meta">...</span>
+      <span class="server-meta" id="sub_name"></span>
+      <span class="server-meta" id="sub_expire"></span>
+      <span class="server-meta" id="sub_updated" style="opacity:.6"></span>
       <button class="btn btn-full" style="background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.2)" onclick="updateSubs()">🔄 Обновить подписку</button>
     </div>
     <div class="card">
@@ -896,14 +898,33 @@ cat <<'EOF' > /www/podkop_panel/index.html
     try{const r=await api('get_hwid_info');document.getElementById('hwid_info').innerHTML='<b>HWID:</b> '+(r.hwid||'?')+'<br><b>OS:</b> '+(r.os_type||'')+' '+(r.os_version||'')+'<br><b>Модель:</b> '+(r.device_model||'?');}catch(e){}
     await loadData();await loadNetwork();
   };
+  function relativeTime(dateStr){
+    if(!dateStr)return '';
+    const d=new Date(dateStr.replace(' ','T'));const now=new Date();
+    const sec=Math.floor((now-d)/1000);
+    if(sec<60)return sec+' сек назад';
+    if(sec<3600)return Math.floor(sec/60)+' мин назад';
+    if(sec<86400)return Math.floor(sec/3600)+' ч назад';
+    return Math.floor(sec/86400)+' д назад';
+  }
+  function extractSubId(url){
+    if(!url)return '';
+    const parts=url.replace(/\/$/,'').split('/');
+    return parts[parts.length-1]||parts[parts.length-2]||'';
+  }
   async function loadData(){
     try{
       const d=await api('get_nodes');
       globalNodes=Array.isArray(d.nodes)?d.nodes:[];
       activeUrl=d.active_url||"";
-      let metaParts=[];if(d.updated)metaParts.push('Обновлено: '+d.updated);if(d.sub_expire)metaParts.push('⏳ '+d.sub_expire);if(d.sub_traffic)metaParts.push('📊 '+d.sub_traffic);document.getElementById('sub_meta').innerText=metaParts.join(' • ')||'Нет данных';
-      const running=d.running;
-      document.getElementById('status_indicator').innerHTML='<span class="status-dot '+(running?'on':'off')+'"></span>';
+      // Subscription name from URL
+      const subUrl=document.getElementById('sub_url').value||'';
+      const subId=extractSubId(subUrl);
+      document.getElementById('sub_name').innerText=subId?('� Подписка: '+subId):'';
+      // Expiry
+      document.getElementById('sub_expire').innerText=d.sub_expire?('Подписка действует ⏳ '+d.sub_expire):'';
+      // Relative time
+      document.getElementById('sub_updated').innerText=d.updated?('Обновлено '+relativeTime(d.updated)):'';
       let an="Нет подключения";
       if(activeUrl&&globalNodes.length){
         const norm=normalizeUrl(activeUrl.trim());
@@ -923,15 +944,12 @@ cat <<'EOF' > /www/podkop_panel/index.html
     globalNodes.forEach((n,i)=>{
       const isA=normalizeUrl((n.full_url||"").trim())===normA;
       const tl=n.transport_label||(n.transport||'tcp').toUpperCase();
-      const isXhttp=n.unsupported||((n.transport||'').toLowerCase()==='xhttp');
-      const badge=`<span class="transport-badge ${getBadge(n.transport)}">${esc(tl)}${isXhttp?' ⚠️':''}</span>`;
-      let btn;
-      if(isA) btn='<button class="btn btn-active">✓ Активен</button>';
-      else if(isXhttp) btn='<button class="btn btn-danger" title="sing-box не поддерживает XHTTP" disabled>⚠️</button>';
-      else btn=`<button class="btn btn-outline" onclick="connect(${i})">Подключить</button>`;
+      const badge=`<span class="transport-badge ${getBadge(n.transport)}">${esc(tl)}</span>`;
+      const btn=isA?`<button class="btn btn-outline" onclick="connect(${i})">🔄 Переподключить</button>`:`<button class="btn btn-outline" onclick="connect(${i})">Подключить</button>`;
       const p=pingData[n.host];
       const pingHtml=p?`<span class="ping-text ${p==='timeout'?'ping-bad':'ping-ok'}">${p}</span>`:'';
-      h+=`<div class="list-row"><div class="node-info"><span class="item-name">${esc(n.name||"Server")}${badge}</span><span class="item-sub">${esc(n.host||"")}${pingHtml}</span></div><div class="node-actions">${btn}</div></div>`;
+      const rowClass=isA?'list-row active-row':'list-row';
+      h+=`<div class="${rowClass}"><div class="node-info"><span class="item-name">${esc(n.name||"Server")}${badge}</span><span class="item-sub">${esc(n.host||"")}${pingHtml}</span></div><div class="node-actions">${btn}</div></div>`;
     });
     div.innerHTML=h;
   }
@@ -939,7 +957,6 @@ cat <<'EOF' > /www/podkop_panel/index.html
   async function saveUrl(){const u=document.getElementById('sub_url').value;if(!u)return;showLoader();try{const r=await api('update_subs',{url:u});showToast(`✅ Сохранено: ${r.count||"?"} серверов`);await loadData();}catch(e){showToast("❌ "+e.message,10000);}finally{hideLoader();}}
   async function connect(i){
     const n=globalNodes[i];
-    if(n.unsupported||((n.transport||'').toLowerCase()==='xhttp')){showToast('⚠️ XHTTP не поддерживается sing-box. Используйте gRPC или TCP.',8000);return;}
     if(!confirm(`Подключиться к ${n.name}?`))return;
     showLoader();try{await api('apply',{node_url:n.full_url});await new Promise(r=>setTimeout(r,2500));await loadData();}catch(e){showToast("❌ "+e.message,10000);}finally{hideLoader();}}
   async function pingAll(){
