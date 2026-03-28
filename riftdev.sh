@@ -1,9 +1,9 @@
 #!/bin/sh
 # === RIFT PANEL INSTALLER & UPDATER (V3.8) ===
-# Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh)
+# Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 
 PANEL_VERSION="3.8"
-REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
+REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 # === MENU: detect existing installation ===
 if [ -f /etc/podkop_data/version ]; then
@@ -55,7 +55,7 @@ echo "=== УСТАНОВКА RIFT PANEL v${PANEL_VERSION} ==="
 # 1) deps
 echo "[1/9] Установка пакетов..."
 opkg update >/dev/null 2>&1
-opkg install ca-bundle coreutils-base64 lua uclient-fetch >/dev/null 2>&1 || true
+opkg install ca-bundle coreutils-base64 lua uclient-fetch curl >/dev/null 2>&1 || true
 
 # 2) structure
 echo "[2/9] Настройка системы..."
@@ -67,12 +67,32 @@ if [ ! -s /etc/config/podkop_subs ]; then
 fi
 echo "${PANEL_VERSION}" > /etc/podkop_data/version
 
-# Generate HWID if not exists
-if [ ! -f /etc/podkop_data/hwid ]; then
-  MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")
-  HWID=$(echo "$MAC" | md5sum | cut -c1-32)
-  echo "$HWID" > /etc/podkop_data/hwid
-fi
+# Generate HWID from multiple hardware sources (tamper-resistant)
+generate_hwid() {
+  local _mac _board _model _cpuinfo _mtd_factory _dmi _salt _raw
+  _mac=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")
+  _board=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "generic")
+  _model=$(cat /tmp/sysinfo/model 2>/dev/null || echo "router")
+  _cpuinfo=$(grep -E "^(Serial|Hardware|machine|system type)" /proc/cpuinfo 2>/dev/null | head -4)
+  # Factory calibration data from MTD — contains burned-in MAC, unique per device, survives MAC spoofing
+  _mtd_factory=""
+  if [ -e /dev/mtd2ro ]; then
+    _mtd_factory=$(dd if=/dev/mtd2ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
+  elif [ -e /dev/mtd0ro ]; then
+    _mtd_factory=$(dd if=/dev/mtd0ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
+  fi
+  # DMI serial for x86 routers
+  _dmi=$(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo "")
+  _salt="RiFT-hW1d-s4Lt-v2"
+  _raw="${_salt}|${_mac}|${_board}|${_model}|${_cpuinfo}|${_mtd_factory}|${_dmi}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$_raw" | sha256sum | cut -c1-16
+  else
+    printf '%s' "$_raw" | md5sum | cut -c1-16
+  fi
+}
+HWID=$(generate_hwid)
+echo "$HWID" > /etc/podkop_data/hwid
 
 # 3) uhttpd
 echo "[3/9] Настройка веб-сервера (порт 2017)..."
@@ -229,10 +249,39 @@ end
 
 local HAS_UCLIENT = cmd_exists("uclient-fetch")
 
+local function generate_hwid()
+  local mac = exec_read("cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo '00:00:00:00:00:00'")
+  local board = exec_read("cat /tmp/sysinfo/board_name 2>/dev/null || echo 'generic'")
+  local model = exec_read("cat /tmp/sysinfo/model 2>/dev/null || echo 'router'")
+  local cpuinfo = exec_read("grep -E '^(Serial|Hardware|machine|system type)' /proc/cpuinfo 2>/dev/null | head -4")
+  local mtd = ""
+  local r2 = exec_silent("test -e /dev/mtd2ro")
+  local r0 = exec_silent("test -e /dev/mtd0ro")
+  if (r2==0) or (r2==true) then
+    mtd = exec_read("dd if=/dev/mtd2ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32")
+  elseif (r0==0) or (r0==true) then
+    mtd = exec_read("dd if=/dev/mtd0ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32")
+  end
+  local dmi = exec_read("cat /sys/class/dmi/id/product_serial 2>/dev/null || echo ''")
+  local salt = "RiFT-hW1d-s4Lt-v2"
+  local raw = salt.."|"..mac.."|"..board.."|"..model.."|"..cpuinfo.."|"..mtd.."|"..dmi
+  local hwid
+  if cmd_exists("sha256sum") then
+    hwid = exec_read("printf %s "..shq(raw).." | sha256sum | cut -c1-16")
+  else
+    hwid = exec_read("printf %s "..shq(raw).." | md5sum | cut -c1-16")
+  end
+  return hwid ~= "" and hwid or "unknown"
+end
+
+local _cached_hwid = nil
 local function get_hwid()
-  local f = io.open("/etc/podkop_data/hwid","r")
-  if f then local h=trim(f:read("*a")); f:close(); return h end
-  return "unknown"
+  if _cached_hwid then return _cached_hwid end
+  _cached_hwid = generate_hwid()
+  -- update file for cron script consistency
+  local f = io.open("/etc/podkop_data/hwid","w")
+  if f then f:write(_cached_hwid); f:close() end
+  return _cached_hwid
 end
 
 local function get_device_model()
@@ -283,30 +332,22 @@ end
 local function smart_fetch(url, out, err)
   local hwid = get_hwid()
   local model = get_device_model()
-  local osver = get_os_version()
   local headers = {
     "x-hwid: " .. hwid,
-    "x-device-os: OpenWRT",
-    "x-ver-os: " .. osver,
     "x-device-model: " .. model
   }
   local ok = fetch_to_file(url, out, err, headers)
-  if not ok then ok = fetch_to_file(url, out, err) end
   return ok
 end
 
 local function smart_fetch_with_headers(url, out, hdr_file)
   local hwid = get_hwid()
   local model = get_device_model()
-  local osver = get_os_version()
   local headers = {
     "x-hwid: " .. hwid,
-    "x-device-os: OpenWRT",
-    "x-ver-os: " .. osver,
     "x-device-model: " .. model
   }
   local ok = fetch_with_headers(url, out, hdr_file, headers)
-  if not ok then ok = fetch_with_headers(url, out, hdr_file) end
   return ok
 end
 
@@ -360,7 +401,7 @@ local method=params.method
 
 print("Content-type: application/json; charset=utf-8\n")
 
-local REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh"
+local REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 local function url_decode(s)
   if not s then return "" end
@@ -922,7 +963,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
       // Subscription name from URL
       const subUrl=document.getElementById('sub_url').value||'';
       const subId=extractSubId(subUrl);
-      document.getElementById('sub_name').innerText=subId?('� Подписка: '+subId):'';
+      document.getElementById('sub_name').innerText=subId?('  Подписка: '+subId):'';
       // Expiry
       document.getElementById('sub_expire').innerText=d.sub_expire?('Подписка действует ⏳ '+d.sub_expire):'';
       // Relative time
@@ -994,15 +1035,36 @@ cat <<'AEOF' > /etc/podkop_data/autoupdate_sub.sh
 #!/bin/sh
 URL="$(uci -q get podkop_subs.config.url)"
 [ -z "$URL" ] && exit 0
-HWID="$(cat /etc/podkop_data/hwid 2>/dev/null)"
+
+# Regenerate HWID from hardware on every run (tamper-resistant)
+_mac=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")
+_board=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "generic")
+_model=$(cat /tmp/sysinfo/model 2>/dev/null || echo "router")
+_cpuinfo=$(grep -E "^(Serial|Hardware|machine|system type)" /proc/cpuinfo 2>/dev/null | head -4)
+_mtd=""
+if [ -e /dev/mtd2ro ]; then
+  _mtd=$(dd if=/dev/mtd2ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
+elif [ -e /dev/mtd0ro ]; then
+  _mtd=$(dd if=/dev/mtd0ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
+fi
+_dmi=$(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo "")
+_salt="RiFT-hW1d-s4Lt-v2"
+_raw="${_salt}|${_mac}|${_board}|${_model}|${_cpuinfo}|${_mtd}|${_dmi}"
+if command -v sha256sum >/dev/null 2>&1; then
+  HWID=$(printf '%s' "$_raw" | sha256sum | cut -c1-16)
+else
+  HWID=$(printf '%s' "$_raw" | md5sum | cut -c1-16)
+fi
+echo "$HWID" > /etc/podkop_data/hwid
+
 MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo 'OpenWrt')"
 OSVER="$(cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_RELEASE | cut -d"'" -f2)"
 BODY="/tmp/podkop_sub_auto.body"
 ERR="/tmp/podkop_sub_auto.err"
 if command -v uclient-fetch >/dev/null 2>&1; then
-  uclient-fetch -q -O "$BODY" --header="User-Agent: v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
+  uclient-fetch -q -O "$BODY" --header="User-Agent: v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-model: $MODEL" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 else
-  wget -q -T 25 -U "v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" -O "$BODY" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
+  wget -q -T 25 -U "v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-model: $MODEL" -O "$BODY" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 fi
 RAW="$(cat "$BODY" 2>/dev/null)"; [ -z "$RAW" ] && { rm -f "$BODY" "$ERR"; exit 0; }
 DECODED=""
@@ -1063,9 +1125,9 @@ cat <<'PEOF' > /etc/podkop_data/autoupdate_panel.sh
 #!/bin/sh
 TMP="/tmp/rift_remote.sh"
 if command -v uclient-fetch >/dev/null 2>&1; then
-  uclient-fetch -q -O "$TMP" "https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh" 2>/dev/null || { rm -f "$TMP"; exit 0; }
+  uclient-fetch -q -O "$TMP" "https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh" 2>/dev/null || { rm -f "$TMP"; exit 0; }
 else
-  wget -q -O "$TMP" "https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/riftdev.sh" 2>/dev/null || { rm -f "$TMP"; exit 0; }
+  wget -q -O "$TMP" "https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh" 2>/dev/null || { rm -f "$TMP"; exit 0; }
 fi
 LOCAL_V="$(cat /etc/podkop_data/version 2>/dev/null)"
 REMOTE_V="$(sed -n 's/^PANEL_VERSION="\([^"]*\)".*/\1/p' "$TMP" | head -1)"
