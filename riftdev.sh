@@ -1,5 +1,5 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.8) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.9) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 
 PANEL_VERSION="3.9"
