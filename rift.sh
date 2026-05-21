@@ -1,8 +1,8 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.9) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.10) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 
-PANEL_VERSION="3.9"
+PANEL_VERSION="3.10"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 # === MENU: detect existing installation ===
@@ -253,7 +253,10 @@ end
 
 local function fetch_to_file(url, out, err, extra_headers)
   exec_silent("rm -f "..out.." "..err)
-  local ua = "v2rayNG/1.8.19"
+  -- UA must NOT be "v2rayNG/*": Remnawave maps that UA to XRAY_JSON response
+  -- (hardcoded, not via SRR rules). Routers can't parse JSON — they expect
+  -- base64 vless list. "RIFT-Router/<ver>" falls through to Fallback XRAY_BASE64.
+  local ua = "RIFT-Router/3.10"
   local hdr = ""
   if extra_headers then
     for _,h in ipairs(extra_headers) do
@@ -273,7 +276,8 @@ end
 -- Fetch and capture response headers (for subscription info)
 local function fetch_with_headers(url, out, hdr_file, extra_headers)
   exec_silent("rm -f "..out.." "..hdr_file)
-  local ua = "v2rayNG/1.8.19"
+  -- See fetch_to_file: avoid "v2rayNG/*" to get XRAY_BASE64 instead of JSON.
+  local ua = "RIFT-Router/3.10"
   local hdr = ""
   if extra_headers then
     for _,h in ipairs(extra_headers) do hdr = hdr .. " --header=" .. shq(h) end
@@ -633,7 +637,7 @@ if method=="update_subs" then
   -- xhttp-only, or nothing parseable at all.
   local lf = io.open("/etc/podkop_data/last_update.log","w")
   if lf then
-    lf:write("=== RIFT v3.9 update ===\n")
+    lf:write("=== RIFT v3.10 update ===\n")
     lf:write("time:        "..os.date("%Y-%m-%d %H:%M:%S").."\n")
     lf:write("url:         "..url.."\n")
     lf:write("body_size:   "..#raw.." bytes\n")
@@ -1073,9 +1077,11 @@ OSVER="$(cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_RELEASE | cut -d"'"
 BODY="/tmp/podkop_sub_auto.body"
 ERR="/tmp/podkop_sub_auto.err"
 if command -v uclient-fetch >/dev/null 2>&1; then
-  uclient-fetch -q -O "$BODY" --header="User-Agent: v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
+  # UA "RIFT-Router/<ver>" — see comment in rpc fetch_to_file. Avoids the
+  # built-in v2rayNG → XRAY_JSON mapping in Remnawave; we need base64 vless.
+  uclient-fetch -q -O "$BODY" --header="User-Agent: RIFT-Router/3.10" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 else
-  wget -q -T 25 -U "v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" -O "$BODY" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
+  wget -q -T 25 -U "RIFT-Router/3.10" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" -O "$BODY" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 fi
 RAW_SIZE="$(wc -c < "$BODY" 2>/dev/null || echo 0)"
 [ "$RAW_SIZE" -lt 16 ] && { rm -f "$BODY" "$ERR"; exit 0; }
@@ -1186,7 +1192,7 @@ end
 -- last_update.log: overwritten each run, single block on flash, no growth
 local lf = io.open("/etc/podkop_data/last_update.log", "w")
 if lf then
-  lf:write("=== RIFT v3.9 update (cron) ===\n")
+  lf:write("=== RIFT v3.10 update (cron) ===\n")
   lf:write("time:        " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
   lf:write("url:         " .. url .. "\n")
   lf:write("body_size:   " .. raw_size .. " bytes\n")
