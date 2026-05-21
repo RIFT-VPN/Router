@@ -1,8 +1,8 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (V3.9) ===
+# === RIFT PANEL INSTALLER & UPDATER (V3.10) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 
-PANEL_VERSION="3.9"
+PANEL_VERSION="3.10"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 # === MENU: detect existing installation ===
@@ -67,32 +67,12 @@ if [ ! -s /etc/config/podkop_subs ]; then
 fi
 echo "${PANEL_VERSION}" > /etc/podkop_data/version
 
-# Generate HWID from multiple hardware sources (tamper-resistant)
-generate_hwid() {
-  local _mac _board _model _cpuinfo _mtd_factory _dmi _salt _raw
-  _mac=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")
-  _board=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "generic")
-  _model=$(cat /tmp/sysinfo/model 2>/dev/null || echo "router")
-  _cpuinfo=$(grep -E "^(Serial|Hardware|machine|system type)" /proc/cpuinfo 2>/dev/null | head -4)
-  # Factory calibration data from MTD — contains burned-in MAC, unique per device, survives MAC spoofing
-  _mtd_factory=""
-  if [ -e /dev/mtd2ro ]; then
-    _mtd_factory=$(dd if=/dev/mtd2ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
-  elif [ -e /dev/mtd0ro ]; then
-    _mtd_factory=$(dd if=/dev/mtd0ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
-  fi
-  # DMI serial for x86 routers
-  _dmi=$(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo "")
-  _salt="RiFT-hW1d-s4Lt-v2"
-  _raw="${_salt}|${_mac}|${_board}|${_model}|${_cpuinfo}|${_mtd_factory}|${_dmi}"
-  if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$_raw" | sha256sum | cut -c1-16
-  else
-    printf '%s' "$_raw" | md5sum | cut -c1-16
-  fi
-}
-HWID=$(generate_hwid)
-echo "$HWID" > /etc/podkop_data/hwid
+# Generate HWID if not exists
+if [ ! -f /etc/podkop_data/hwid ]; then
+  MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")
+  HWID=$(echo "$MAC" | md5sum | cut -c1-32)
+  echo "$HWID" > /etc/podkop_data/hwid
+fi
 
 # 3) uhttpd
 echo "[3/9] Настройка веб-сервера (порт 2017)..."
@@ -215,6 +195,10 @@ end
 
 function exec_read(cmd)
   local h=io.popen(cmd)
+  -- io.popen can return nil on BusyBox if the shell rejects the command
+  -- (notably ARG_MAX overflow when the caller pipes a huge string in).
+  -- Without this guard the whole RPC crashed with "attempt to index nil".
+  if not h then return "" end
   local r=h:read("*a")
   h:close()
   return r and trim(r) or ""
@@ -249,39 +233,10 @@ end
 
 local HAS_UCLIENT = cmd_exists("uclient-fetch")
 
-local function generate_hwid()
-  local mac = exec_read("cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo '00:00:00:00:00:00'")
-  local board = exec_read("cat /tmp/sysinfo/board_name 2>/dev/null || echo 'generic'")
-  local model = exec_read("cat /tmp/sysinfo/model 2>/dev/null || echo 'router'")
-  local cpuinfo = exec_read("grep -E '^(Serial|Hardware|machine|system type)' /proc/cpuinfo 2>/dev/null | head -4")
-  local mtd = ""
-  local r2 = exec_silent("test -e /dev/mtd2ro")
-  local r0 = exec_silent("test -e /dev/mtd0ro")
-  if (r2==0) or (r2==true) then
-    mtd = exec_read("dd if=/dev/mtd2ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32")
-  elseif (r0==0) or (r0==true) then
-    mtd = exec_read("dd if=/dev/mtd0ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32")
-  end
-  local dmi = exec_read("cat /sys/class/dmi/id/product_serial 2>/dev/null || echo ''")
-  local salt = "RiFT-hW1d-s4Lt-v2"
-  local raw = salt.."|"..mac.."|"..board.."|"..model.."|"..cpuinfo.."|"..mtd.."|"..dmi
-  local hwid
-  if cmd_exists("sha256sum") then
-    hwid = exec_read("printf %s "..shq(raw).." | sha256sum | cut -c1-16")
-  else
-    hwid = exec_read("printf %s "..shq(raw).." | md5sum | cut -c1-16")
-  end
-  return hwid ~= "" and hwid or "unknown"
-end
-
-local _cached_hwid = nil
 local function get_hwid()
-  if _cached_hwid then return _cached_hwid end
-  _cached_hwid = generate_hwid()
-  -- update file for cron script consistency
-  local f = io.open("/etc/podkop_data/hwid","w")
-  if f then f:write(_cached_hwid); f:close() end
-  return _cached_hwid
+  local f = io.open("/etc/podkop_data/hwid","r")
+  if f then local h=trim(f:read("*a")); f:close(); return h end
+  return "unknown"
 end
 
 local function get_device_model()
@@ -298,7 +253,10 @@ end
 
 local function fetch_to_file(url, out, err, extra_headers)
   exec_silent("rm -f "..out.." "..err)
-  local ua = "v2rayNG/1.8.19"
+  -- UA must NOT be "v2rayNG/*": Remnawave maps that UA to XRAY_JSON response
+  -- (hardcoded, not via SRR rules). Routers can't parse JSON — they expect
+  -- base64 vless list. "RIFT-Router/<ver>" falls through to Fallback XRAY_BASE64.
+  local ua = "RIFT-Router/3.10"
   local hdr = ""
   if extra_headers then
     for _,h in ipairs(extra_headers) do
@@ -318,7 +276,8 @@ end
 -- Fetch and capture response headers (for subscription info)
 local function fetch_with_headers(url, out, hdr_file, extra_headers)
   exec_silent("rm -f "..out.." "..hdr_file)
-  local ua = "v2rayNG/1.8.19"
+  -- See fetch_to_file: avoid "v2rayNG/*" to get XRAY_BASE64 instead of JSON.
+  local ua = "RIFT-Router/3.10"
   local hdr = ""
   if extra_headers then
     for _,h in ipairs(extra_headers) do hdr = hdr .. " --header=" .. shq(h) end
@@ -332,22 +291,30 @@ end
 local function smart_fetch(url, out, err)
   local hwid = get_hwid()
   local model = get_device_model()
+  local osver = get_os_version()
   local headers = {
     "x-hwid: " .. hwid,
+    "x-device-os: OpenWRT",
+    "x-ver-os: " .. osver,
     "x-device-model: " .. model
   }
   local ok = fetch_to_file(url, out, err, headers)
+  if not ok then ok = fetch_to_file(url, out, err) end
   return ok
 end
 
 local function smart_fetch_with_headers(url, out, hdr_file)
   local hwid = get_hwid()
   local model = get_device_model()
+  local osver = get_os_version()
   local headers = {
     "x-hwid: " .. hwid,
+    "x-device-os: OpenWRT",
+    "x-ver-os: " .. osver,
     "x-device-model: " .. model
   }
   local ok = fetch_with_headers(url, out, hdr_file, headers)
+  if not ok then ok = fetch_with_headers(url, out, hdr_file) end
   return ok
 end
 
@@ -477,12 +444,19 @@ local function link_to_node(line)
 end
 
 -- Filter and dedup
+-- Phone-only BS-bypass hosts come from the panel's sub-proxy auto-injection
+-- (tag pattern "🇽🇽📱 Обход БС #N.N <transport>" or xray "BS_*" outbound tag).
+-- Routers can't use them — they need the operator-whitelist trick that only
+-- works on mobile. Two reliable markers, both unambiguous:
+--   • 📱 emoji — present on every phone-only key, never on a regular one
+--   • "BS_" — xray internal tag prefix added by sub-proxy
+-- Lua patterns are byte-oriented and NOT unicode-aware, so we deliberately
+-- avoid Cyrillic word-boundary tricks (they false-positive on words like
+-- "обсуждение" because %w is ASCII-only).
 local function should_skip(name)
   if not name then return false end
-  local lower = name:lower()
-  -- Filter phone-only and unsupported transport entries
-  if lower:find("обход бс") or lower:find("обход%s+бс") then return true end
   if name:match("📱") then return true end
+  if name:match("BS_") then return true end
   return false
 end
 
@@ -496,19 +470,32 @@ local function get_url_key(url)
   return (url:match("^([^#]+)") or url)
 end
 
+-- Returns (nodes, stats). Stats lets the caller log exactly why each link
+-- was dropped — without this the panel just silently said "Серверы не найдены"
+-- and we had no way to tell from the router whether the upstream sent BS-only,
+-- xhttp-only, or genuinely broke.
 local function parse_nodes(text)
   local nodes={}
   local seen={}
+  local stats={total=0, accepted=0, dup=0, bs=0, xhttp=0, other=0}
   local links=parse_links_from_text(text or "")
   for _,u in ipairs(links) do
+    stats.total = stats.total + 1
     local node = link_to_node(u)
     local key = get_url_key(u)
-    if not seen[key] and not should_skip(node.name) and not is_xhttp(node.transport) then
+    if seen[key] then
+      stats.dup = stats.dup + 1
+    elseif should_skip(node.name) then
+      stats.bs = stats.bs + 1
+    elseif is_xhttp(node.transport) then
+      stats.xhttp = stats.xhttp + 1
+    else
       seen[key] = true
       nodes[#nodes+1] = node
+      stats.accepted = stats.accepted + 1
     end
   end
-  return nodes
+  return nodes, stats
 end
 
 local function b64_urlsafefix(s)
@@ -524,7 +511,16 @@ local function try_decode_base64(raw)
   if #t < 16 then return "" end
   if not t:match("^[%w%+/%=_%-%s]+$") then return "" end
   t = b64_urlsafefix(t)
-  local dec = exec_read("printf %s " .. shq(t) .. " | base64 -d 2>/dev/null")
+  -- BusyBox shell ARG_MAX (~128KB) overflows when the encoded body is large,
+  -- which made io.popen return nil and the whole RPC die. Write to a tmp file
+  -- and decode from there — no shell-argument size limit involved.
+  local tmp = "/tmp/.podkop_b64." .. tostring(os.time()) .. "." .. tostring(math.random(1,99999))
+  local f = io.open(tmp, "w")
+  if not f then return "" end
+  f:write(t)
+  f:close()
+  local dec = exec_read("base64 -d " .. tmp .. " 2>/dev/null")
+  os.remove(tmp)
   return dec or ""
 end
 
@@ -622,15 +618,51 @@ if method=="update_subs" then
   os.remove(hdr_file)
 
   -- try raw first, then base64
-  local nodes = parse_nodes(raw)
+  local nodes, stats = parse_nodes(raw)
+  local source = "raw"
+  local decoded_len = 0
   if #nodes == 0 then
     local decoded = try_decode_base64(raw)
-    if decoded ~= "" then nodes = parse_nodes(decoded) end
+    decoded_len = #decoded
+    if decoded ~= "" then
+      nodes, stats = parse_nodes(decoded)
+      source = "base64"
+    end
+  end
+
+  -- Always write last_update.log: this is overwritten on each run (single block
+  -- on flash, no append-only growth) so we can diagnose "Серверы не найдены"
+  -- without sshing in. Includes raw/decoded size, parse source, and per-skip
+  -- counts so we can tell at a glance whether the upstream sent BS-only,
+  -- xhttp-only, or nothing parseable at all.
+  local lf = io.open("/etc/podkop_data/last_update.log","w")
+  if lf then
+    lf:write("=== RIFT v3.10 update ===\n")
+    lf:write("time:        "..os.date("%Y-%m-%d %H:%M:%S").."\n")
+    lf:write("url:         "..url.."\n")
+    lf:write("body_size:   "..#raw.." bytes\n")
+    lf:write("source:      "..source.."\n")
+    if source == "base64" then
+      lf:write("decoded_size:"..decoded_len.." bytes\n")
+    end
+    lf:write("parsed:      "..stats.total.." links\n")
+    lf:write("  accepted:  "..stats.accepted.."\n")
+    lf:write("  skipped BS/phone: "..stats.bs.."\n")
+    lf:write("  skipped xhttp:    "..stats.xhttp.."\n")
+    lf:write("  duplicates:       "..stats.dup.."\n")
+    lf:write("sub_title:   "..(sub_info.title or "").."\n")
+    lf:write("sub_expire:  "..(sub_info.expire or "").."\n")
+    lf:close()
   end
 
   if #nodes == 0 then
-    print(to_json({status="error", msg="Серверы не найдены"}))
-    os.remove(body); os.remove(hdr_file); os.exit(0)
+    print(to_json({
+      status="error",
+      msg="Серверы не найдены",
+      diag={body_size=#raw, source=source, parsed=stats.total,
+            skipped_bs=stats.bs, skipped_xhttp=stats.xhttp}
+    }))
+    os.remove(body); os.remove(err); os.exit(0)
   end
 
   -- Build traffic string
@@ -651,7 +683,11 @@ if method=="update_subs" then
   if f then
     f:write("return "..serialize(db))
     f:close()
-    print(to_json({status="ok", count=#nodes, expire=db.expire, sub_title=db.sub_title, sub_traffic=traffic_str}))
+    print(to_json({
+      status="ok", count=#nodes, expire=db.expire,
+      sub_title=db.sub_title, sub_traffic=traffic_str,
+      diag={parsed=stats.total, skipped_bs=stats.bs, skipped_xhttp=stats.xhttp}
+    }))
   else
     print('{"status":"error","msg":"Ошибка записи"}')
   end
@@ -963,7 +999,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
       // Subscription name from URL
       const subUrl=document.getElementById('sub_url').value||'';
       const subId=extractSubId(subUrl);
-      document.getElementById('sub_name').innerText=subId?('  Подписка: '+subId):'';
+      document.getElementById('sub_name').innerText=subId?('� Подписка: '+subId):'';
       // Expiry
       document.getElementById('sub_expire').innerText=d.sub_expire?('Подписка действует ⏳ '+d.sub_expire):'';
       // Relative time
@@ -1029,94 +1065,152 @@ cat <<'EOF' > /www/podkop_panel/index.html
 </html>
 EOF
 
-# 8) Auto-update subscription (every 5 min)
+# 8) Auto-update subscription (hourly)
 echo "[8/9] Настройка автообновления..."
 cat <<'AEOF' > /etc/podkop_data/autoupdate_sub.sh
 #!/bin/sh
 URL="$(uci -q get podkop_subs.config.url)"
 [ -z "$URL" ] && exit 0
-
-# Regenerate HWID from hardware on every run (tamper-resistant)
-_mac=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")
-_board=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "generic")
-_model=$(cat /tmp/sysinfo/model 2>/dev/null || echo "router")
-_cpuinfo=$(grep -E "^(Serial|Hardware|machine|system type)" /proc/cpuinfo 2>/dev/null | head -4)
-_mtd=""
-if [ -e /dev/mtd2ro ]; then
-  _mtd=$(dd if=/dev/mtd2ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
-elif [ -e /dev/mtd0ro ]; then
-  _mtd=$(dd if=/dev/mtd0ro bs=1 count=64 skip=4 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)
-fi
-_dmi=$(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo "")
-_salt="RiFT-hW1d-s4Lt-v2"
-_raw="${_salt}|${_mac}|${_board}|${_model}|${_cpuinfo}|${_mtd}|${_dmi}"
-if command -v sha256sum >/dev/null 2>&1; then
-  HWID=$(printf '%s' "$_raw" | sha256sum | cut -c1-16)
-else
-  HWID=$(printf '%s' "$_raw" | md5sum | cut -c1-16)
-fi
-echo "$HWID" > /etc/podkop_data/hwid
-
+HWID="$(cat /etc/podkop_data/hwid 2>/dev/null)"
 MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo 'OpenWrt')"
 OSVER="$(cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_RELEASE | cut -d"'" -f2)"
 BODY="/tmp/podkop_sub_auto.body"
 ERR="/tmp/podkop_sub_auto.err"
 if command -v uclient-fetch >/dev/null 2>&1; then
-  uclient-fetch -q -O "$BODY" --header="User-Agent: v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-model: $MODEL" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
+  # UA "RIFT-Router/<ver>" — see comment in rpc fetch_to_file. Avoids the
+  # built-in v2rayNG → XRAY_JSON mapping in Remnawave; we need base64 vless.
+  uclient-fetch -q -O "$BODY" --header="User-Agent: RIFT-Router/3.10" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 else
-  wget -q -T 25 -U "v2rayNG/1.8.19" --header="x-hwid: $HWID" --header="x-device-model: $MODEL" -O "$BODY" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
+  wget -q -T 25 -U "RIFT-Router/3.10" --header="x-hwid: $HWID" --header="x-device-os: OpenWRT" --header="x-ver-os: $OSVER" --header="x-device-model: $MODEL" -O "$BODY" "$URL" 2>"$ERR" || { rm -f "$BODY" "$ERR"; exit 0; }
 fi
-RAW="$(cat "$BODY" 2>/dev/null)"; [ -z "$RAW" ] && { rm -f "$BODY" "$ERR"; exit 0; }
-DECODED=""
-if ! echo "$RAW" | grep -q "://"; then
-  SAFE="$(echo "$RAW" | tr -d '\n\r\t ' | sed 's/-/+/g;s/_/\//g')"
-  PAD=$(( (4 - ${#SAFE} % 4) % 4 )); while [ "$PAD" -gt 0 ]; do SAFE="${SAFE}="; PAD=$((PAD-1)); done
-  DECODED="$(printf '%s' "$SAFE" | base64 -d 2>/dev/null)"
+RAW_SIZE="$(wc -c < "$BODY" 2>/dev/null || echo 0)"
+[ "$RAW_SIZE" -lt 16 ] && { rm -f "$BODY" "$ERR"; exit 0; }
+
+# If the body has no "://", treat it as base64 and decode via tmp file
+# (printf '%s' "$huge" overflows BusyBox shell ARG_MAX on large subs and
+# silently produces empty output — same root cause as the RPC bug).
+TEXT_FILE="$BODY"
+SOURCE="raw"
+if ! grep -q "://" "$BODY"; then
+  CLEAN="/tmp/podkop_sub_auto.b64"
+  tr -d '\n\r\t ' < "$BODY" | sed 's/-/+/g;s/_/\//g' > "$CLEAN"
+  CL_LEN=$(wc -c < "$CLEAN"); PAD=$(( (4 - CL_LEN % 4) % 4 ))
+  while [ "$PAD" -gt 0 ]; do printf '=' >> "$CLEAN"; PAD=$((PAD-1)); done
+  DEC="/tmp/podkop_sub_auto.dec"
+  base64 -d "$CLEAN" > "$DEC" 2>/dev/null
+  rm -f "$CLEAN"
+  if grep -q "://" "$DEC" 2>/dev/null; then
+    TEXT_FILE="$DEC"
+    SOURCE="base64"
+  else
+    rm -f "$DEC" "$BODY" "$ERR"; exit 0
+  fi
 fi
-TEXT="${DECODED:-$RAW}"
-echo "$TEXT" | grep -q "://" || { rm -f "$BODY" "$ERR"; exit 0; }
-COUNT=$(echo "$TEXT" | grep -c "://")
-lua -e "
-local text=[=[$TEXT]=]
-local nodes,seen={},{}
-for line in text:gmatch('[^\n\r]+') do
-  line=line:match('^%s*(.-)%s*$')
-  local proto=line:match('^(%w+)://')
+COUNT=$(grep -c "://" "$TEXT_FILE")
+
+# Lua parses from the file (not from an embedded string) so we never have
+# to escape body contents into the shell-quoted -e argument.
+lua - "$TEXT_FILE" "$RAW_SIZE" "$SOURCE" "$URL" <<'LEOF' 2>/dev/null
+local fpath, raw_size, source, url = arg[1], arg[2], arg[3], arg[4]
+local fh = io.open(fpath, "r")
+if not fh then os.exit(1) end
+local text = fh:read("*a") or ""
+fh:close()
+
+local stats = {total=0, accepted=0, dup=0, bs=0, xhttp=0}
+local nodes, seen = {}, {}
+
+local function should_skip(name)
+  if not name then return false end
+  if name:match("📱") then return true end
+  if name:match("BS_") then return true end
+  return false
+end
+
+for line in text:gmatch("[^\n\r]+") do
+  line = line:match("^%s*(.-)%s*$")
+  local proto = line:match("^(%w+)://")
   if proto then
-    local key=line:match('^([^#]+)') or line
-    if not seen[key] then
-      seen[key]=true
-      local ne=line:match('#(.+)$')
-      local name='Server'
-      if ne then name=ne:gsub('%%(%x%x)',function(h)return string.char(tonumber(h,16))end) end
-      -- skip phone-only and xhttp entries
-      local _transport = line:match('[?&]type=([^&#]*)') or 'tcp'
-      if not name:lower():find('обход бс') and not name:find('📱') and _transport ~= 'xhttp' and _transport ~= 'splithttp' then
-        local host=line:match('@(.-)[:?]') or line:match('://([^/:#?]+)') or 'unknown'
-        local transport=line:match('[?&]type=([^&#]*)') or 'tcp'
-        local security=line:match('[?&]security=([^&#]*)') or ''
-        local tl=transport:upper()
-        if transport=='grpc' then tl='gRPC' elseif transport=='xhttp' then tl='XHTTP' end
-        local ti=proto:upper(); if security=='reality' then ti='Reality' end
-        nodes[#nodes+1]={name=name,host=host,type=ti,transport=transport,transport_label=tl,security=security,
-          service_name=line:match('[?&]serviceName=([^&#]*)') or '',path=line:match('[?&]path=([^&#]*)') or '',
-          mode=line:match('[?&]mode=([^&#]*)') or '',flow=line:match('[?&]flow=([^&#]*)') or '',full_url=line}
+    stats.total = stats.total + 1
+    local key = line:match("^([^#]+)") or line
+    if seen[key] then
+      stats.dup = stats.dup + 1
+    else
+      local ne = line:match("#(.+)$")
+      local name = "Server"
+      if ne then name = ne:gsub("%%(%x%x)", function(h) return string.char(tonumber(h,16)) end) end
+      local transport = line:match("[?&]type=([^&#]*)") or "tcp"
+      transport = transport:lower()
+      if should_skip(name) then
+        stats.bs = stats.bs + 1
+      elseif transport == "xhttp" or transport == "splithttp" then
+        stats.xhttp = stats.xhttp + 1
+      else
+        seen[key] = true
+        local host = line:match("@(.-)[:?]") or line:match("://([^/:#?]+)") or "unknown"
+        local security = line:match("[?&]security=([^&#]*)") or ""
+        local tl = transport:upper()
+        if transport == "grpc" then tl = "gRPC" end
+        local ti = proto:upper(); if security == "reality" then ti = "Reality" end
+        nodes[#nodes+1] = {
+          name=name, host=host, type=ti, transport=transport, transport_label=tl,
+          security=security,
+          service_name = line:match("[?&]serviceName=([^&#]*)") or "",
+          path         = line:match("[?&]path=([^&#]*)")        or "",
+          mode         = line:match("[?&]mode=([^&#]*)")        or "",
+          flow         = line:match("[?&]flow=([^&#]*)")        or "",
+          full_url=line,
+        }
+        stats.accepted = stats.accepted + 1
       end
     end
   end
 end
+
 local function ser(v)
-  local t=type(v)
-  if t=='table' then local p={};for k,vv in pairs(v) do p[#p+1]=(type(k)=='number' and '' or ('[\"'..k..'\"]='  ))..ser(vv) end;return '{'..table.concat(p,',')..'}'
-  elseif t=='string' then return string.format('%q',v)
+  local t = type(v)
+  if t == "table" then
+    local p = {}
+    for k, vv in pairs(v) do
+      p[#p+1] = (type(k) == "number" and "" or ("[\""..k.."\"]=")) .. ser(vv)
+    end
+    return "{" .. table.concat(p, ",") .. "}"
+  elseif t == "string" then return string.format("%q", v)
   else return tostring(v) end
 end
-local db={expire='Нет данных',updated=os.date('%Y-%m-%d %H:%M:%S'),nodes=nodes}
-local f=io.open('/etc/podkop_data/nodes.lua','w')
-if f then f:write('return '..ser(db)); f:close() end
-" 2>/dev/null
-rm -f "$BODY" "$ERR"
-logger -t "rift-panel" "Subscription updated: $COUNT nodes"
+
+if #nodes > 0 then
+  local db = {
+    expire = "Нет данных",
+    updated = os.date("%Y-%m-%d %H:%M:%S"),
+    nodes = nodes,
+  }
+  local fout = io.open("/etc/podkop_data/nodes.lua", "w")
+  if fout then fout:write("return " .. ser(db)); fout:close() end
+end
+
+-- last_update.log: overwritten each run, single block on flash, no growth
+local lf = io.open("/etc/podkop_data/last_update.log", "w")
+if lf then
+  lf:write("=== RIFT v3.10 update (cron) ===\n")
+  lf:write("time:        " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+  lf:write("url:         " .. url .. "\n")
+  lf:write("body_size:   " .. raw_size .. " bytes\n")
+  lf:write("source:      " .. source .. "\n")
+  lf:write("parsed:      " .. stats.total .. " links\n")
+  lf:write("  accepted:  " .. stats.accepted .. "\n")
+  lf:write("  skipped BS/phone: " .. stats.bs .. "\n")
+  lf:write("  skipped xhttp:    " .. stats.xhttp .. "\n")
+  lf:write("  duplicates:       " .. stats.dup .. "\n")
+  lf:close()
+end
+LEOF
+
+# Cleanup our own tmp files only. Don't touch /tmp/.podkop_b64.* —
+# those belong to the RPC's try_decode_base64 and could be in active use
+# by a concurrent panel request.
+rm -f "$BODY" "$ERR" /tmp/podkop_sub_auto.dec /tmp/podkop_sub_auto.b64
+logger -t "rift-panel" "Subscription updated: $COUNT links seen, source=$SOURCE"
 AEOF
 chmod +x /etc/podkop_data/autoupdate_sub.sh
 
@@ -1139,7 +1233,11 @@ chmod +x /etc/podkop_data/autoupdate_panel.sh
 # 9) cron
 echo "[9/9] Настройка cron..."
 (crontab -l 2>/dev/null | grep -Fv "autoupdate_sub" | grep -Fv "autoupdate_panel" | grep -Fv "/etc/podkop_data/") | crontab -
-(crontab -l 2>/dev/null; echo "*/5 * * * * /etc/podkop_data/autoupdate_sub.sh"; echo "13 4 * * * /etc/podkop_data/autoupdate_panel.sh") | crontab -
+# Subscription every hour at :17 (off-peak minute, avoids :00 clock-aligned spike).
+# Switched from */5 to hourly to cut flash wear ~12× — nodes.lua now gets ~720
+# writes/month instead of ~8600 — important for cheap router flash.
+# Panel check stays daily at 04:13.
+(crontab -l 2>/dev/null; echo "17 * * * * /etc/podkop_data/autoupdate_sub.sh"; echo "13 4 * * * /etc/podkop_data/autoupdate_panel.sh") | crontab -
 
 # finish
 chmod +x /www/podkop_panel/cgi-bin/rpc
@@ -1148,11 +1246,16 @@ sed -i 's/\r$//' /www/podkop_panel/cgi-bin/rpc
 /etc/init.d/uhttpd restart >/dev/null 2>&1
 /etc/init.d/dnsmasq restart >/dev/null 2>&1
 
+# Trigger one subscription refresh right now so users upgrading from 3.8
+# don't wait up to an hour for the new parser to rebuild nodes.lua.
+# Safe if the URL is unset — the script exits silently.
+/etc/podkop_data/autoupdate_sub.sh >/dev/null 2>&1 &
+
 ROUTER_IP="$(uci -q get network.lan.ipaddr)"
 [ -z "$ROUTER_IP" ] && ROUTER_IP="192.168.1.1"
 echo "================================================="
 echo "ГОТОВО! RIFT Panel v${PANEL_VERSION}"
 echo "Доступ: http://${ROUTER_IP}:2017"
 echo "HWID: $(cat /etc/podkop_data/hwid 2>/dev/null)"
-echo "Авто-обновление подписки: каждые 5 минут"
+echo "Авто-обновление подписки: раз в час"
 echo "================================================="
