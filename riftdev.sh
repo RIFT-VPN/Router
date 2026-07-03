@@ -866,6 +866,13 @@ end
 
 local SKIP_NAME_PLAIN = string.char(0xD0,0xBE,0xD0,0xB1,0xD1,0x85,0xD0,0xBE,0xD0,0xB4,0x20,0xD0,0xB1,0xD1,0x81)
 local PHONE_ICON = string.char(0xF0,0x9F,0x93,0xB1)
+-- Маркер смарт-хоста «АВТО-СМАРТ» (balancer 3-в-1). На роутере smart-профиль бесполезен:
+-- панель берёт первый inbound из XRAY_JSON-элемента (gRPC-заглушку), balancer не собирается.
+-- Скрываем его из списка узлов визуально. ВАЖНО: в XRAY_JSON-подписке эмодзи 🔁 из remark
+-- обрезается панелью — остаётся голое «АВТО-СМАРТ», поэтому фильтруем по КИРИЛЛИЧЕСКОМУ тексту,
+-- а не по эмодзи. Lua 5.1 не поддерживает \xHH — задаём байтами UTF-8 через string.char.
+-- "АВТО-СМАРТ" = D0 90 D0 92 D0 A2 D0 9E 2D D0 A1 D0 9C D0 90 D0 A0 D0 A2
+local SMART_NAME = string.char(0xD0,0x90,0xD0,0x92,0xD0,0xA2,0xD0,0x9E,0x2D,0xD0,0xA1,0xD0,0x9C,0xD0,0x90,0xD0,0xA0,0xD0,0xA2)
 
 -- Filter and dedup
 local function should_skip(name)
@@ -874,6 +881,8 @@ local function should_skip(name)
   -- Filter phone-only entries
   if lower:find(SKIP_NAME_PLAIN, 1, true) then return true end
   if tostring(name):find(PHONE_ICON, 1, true) then return true end
+  -- Filter smart-host (АВТО-СМАРТ, balancer) — не показываем на роутере
+  if tostring(name):find(SMART_NAME, 1, true) then return true end
   return false
 end
 
