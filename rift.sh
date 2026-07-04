@@ -7,7 +7,7 @@
 #   - Разделители ㅤ (U+3164) рендерятся как тонкая линия без кнопок
 #   - MAC-based «полный VPN»: storage MAC + watcher daemon обновляет IP при переподключении
 
-PANEL_VERSION="4.7"
+PANEL_VERSION="4.8"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 EXT_SINGBOX_INSTALL_URL="https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh"
 
@@ -1894,15 +1894,10 @@ if method=="ping_all" then
 end
 
 -- ===========================================================================
--- v4.7: MAC-based "full VPN"
--- ===========================================================================
--- Раньше: список IP в uci podkop.main.fully_routed_ips. При переподключении
---         DHCP-lease даёт устройству НОВЫЙ IP -> оно выпадало из VPN, юзеру
---         приходилось вручную нажимать «включить» повторно.
--- Сейчас: панель хранит MAC + hostname в /etc/podkop_data/vpn_macs.list.
---         Watcher daemon (rift-mac-vpn-watcher) каждые 30s мапит MAC->IP через
---         ip neigh + dhcp.leases и обновляет podkop.main.fully_routed_ips,
---         если набор IP изменился. UI работает только с MAC.
+-- "Полный VPN" по IP устройства (как в старой версии).
+-- Список IP хранится в podkop.main.fully_routed_ips, UI оперирует IP.
+-- MAC-режим (watcher + vpn_macs.list) отложен — helpers ниже оставлены
+-- дормантными для будущей реализации, но НЕ вызываются.
 -- ===========================================================================
 local VPN_MACS_FILE = "/etc/podkop_data/vpn_macs.list"
 
@@ -1992,63 +1987,35 @@ if method=="get_network" then
       end
     end
   end
-  -- Saved MAC-список из vpn_macs.list (то что юзер «включил VPN для»)
-  local vpn_macs = {}
-  for _, m in ipairs(read_vpn_macs()) do
-    vpn_macs[#vpn_macs+1] = m.mac
-  end
-  -- Текущий IP-список из podkop (для отображения какие IP уже фактически роутятся)
-  local current_ips = {}
+  -- Активный список IP из podkop (то что юзер «включил VPN для»)
+  local vpn_ips = {}
   for w in (exec_read("uci -q get podkop.main.fully_routed_ips") or ""):gmatch("%S+") do
-    current_ips[#current_ips+1] = w
+    vpn_ips[#vpn_ips+1] = w
   end
   -- Домены
   local domains = {}
   for w in (exec_read("uci -q get podkop.main.user_domains") or ""):gmatch("%S+") do
     domains[#domains+1] = w
   end
-  print(to_json({clients=clients, vpn_macs=vpn_macs, vpn_ips_active=current_ips, domains=domains}))
+  print(to_json({clients=clients, vpn_ips=vpn_ips, domains=domains}))
   os.exit(0)
 end
 
 if method=="manage_vpn" then
-  -- v4.7: оперируем MAC-ом, не IP. Watcher daemon сам переотразит IP.
-  local mac = (params.mac or ""):lower()
-  local name = params.name or ""
+  -- Полный VPN по IP устройства (как в старой версии). MAC-режим — позже.
+  local ip = params.ip
   local a = params.action
-  if mac == "" or not a then
-    print('{"status":"error","msg":"mac and action required"}')
-    os.exit(0)
-  end
-  -- Валидация MAC (xx:xx:xx:xx:xx:xx)
-  if not mac:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") then
-    print('{"status":"error","msg":"bad mac format"}')
-    os.exit(0)
-  end
-  local list = read_vpn_macs()
-  if a == "add" then
-    local found = false
-    for _, m in ipairs(list) do
-      if m.mac == mac then m.name = name; found = true; break end
+  if ip and a and ip:match("^%d+%.%d+%.%d+%.%d+$") then
+    if a == "add" then
+      exec_silent("uci add_list podkop.main.fully_routed_ips="..shq(ip))
+    elseif a == "del" then
+      exec_silent("uci del_list podkop.main.fully_routed_ips="..shq(ip))
     end
-    if not found then list[#list+1] = {mac = mac, name = name} end
-  elseif a == "del" then
-    local new = {}
-    for _, m in ipairs(list) do
-      if m.mac ~= mac then new[#new+1] = m end
-    end
-    list = new
+    exec_silent("uci commit podkop"); exec_silent("/etc/init.d/podkop restart")
+    print('{"status":"ok"}')
   else
-    print('{"status":"error","msg":"bad action"}')
-    os.exit(0)
+    print('{"status":"error","msg":"bad ip"}')
   end
-  if not write_vpn_macs(list) then
-    print('{"status":"error","msg":"cannot write vpn_macs.list"}')
-    os.exit(0)
-  end
-  -- Тригернуть немедленную пересборку IP-списка
-  exec_silent("/usr/local/sbin/rift-mac-vpn-watcher --once 2>/dev/null")
-  print('{"status":"ok"}')
   os.exit(0)
 end
 
@@ -2327,9 +2294,10 @@ cat <<'EOF' > /www/podkop_panel/index.html
   const FLAG_SVG={
     DE:'<svg viewBox="0 0 18 12" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="18" height="12" fill="#FFCE00"/><rect width="18" height="8" fill="#DD0000"/><rect width="18" height="4" fill="#111"/></svg>',
     FI:'<svg viewBox="0 0 18 12" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="18" height="12" fill="#FFFFFF"/><rect x="5" width="3" height="12" fill="#003580"/><rect y="4" width="18" height="3" fill="#003580"/></svg>',
-    US:'<svg viewBox="0 0 18 12" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="18" height="12" fill="#B22234"/><rect y="1" width="18" height="1" fill="#FFFFFF"/><rect y="3" width="18" height="1" fill="#FFFFFF"/><rect y="5" width="18" height="1" fill="#FFFFFF"/><rect y="7" width="18" height="1" fill="#FFFFFF"/><rect y="9" width="18" height="1" fill="#FFFFFF"/><rect y="11" width="18" height="1" fill="#FFFFFF"/><rect width="8" height="6.5" fill="#3C3B6E"/></svg>'
+    US:'<svg viewBox="0 0 18 12" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="18" height="12" fill="#B22234"/><rect y="1" width="18" height="1" fill="#FFFFFF"/><rect y="3" width="18" height="1" fill="#FFFFFF"/><rect y="5" width="18" height="1" fill="#FFFFFF"/><rect y="7" width="18" height="1" fill="#FFFFFF"/><rect y="9" width="18" height="1" fill="#FFFFFF"/><rect y="11" width="18" height="1" fill="#FFFFFF"/><rect width="8" height="6.5" fill="#3C3B6E"/></svg>',
+    RU:'<svg viewBox="0 0 18 12" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="18" height="12" fill="#FFFFFF"/><rect y="4" width="18" height="4" fill="#0039A6"/><rect y="8" width="18" height="4" fill="#D52B1E"/></svg>'
   };
-  let globalNodes=[],activeKey="",vpnMacs=[],vpnIpsActive=[],domains=[],pingData={},dnsProtectionState=null;
+  let globalNodes=[],activeKey="",vpnIps=[],domains=[],pingData={},dnsProtectionState=null;
   const RU={
     request_failed:'\u041e\u0448\u0438\u0431\u043a\u0430',
     regular_singbox:'\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d \u043e\u0431\u044b\u0447\u043d\u044b\u0439 sing-box. \u041f\u0440\u0438 \u043f\u0435\u0440\u0432\u043e\u043c XHTTP-\u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0438 \u043f\u0430\u043d\u0435\u043b\u044c \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0442 sing-box-extended.',
@@ -2862,117 +2830,16 @@ rm -f "$TMP"
 AEOF
 chmod +x /etc/podkop_data/autoupdate_sub.sh
 
-# 8.5) MAC-based VPN watcher (v4.7) -------------------------------------------
-logi "[9.5/10] Установка MAC-VPN watcher..."
-touch /etc/podkop_data/vpn_macs.list
-
-cat <<'WEOF' > /usr/local/sbin/rift-mac-vpn-watcher
-#!/bin/sh
-# rift-mac-vpn-watcher: каждые 30 сек переотражает MAC->IP в podkop.main.fully_routed_ips
-# Storage: /etc/podkop_data/vpn_macs.list (формат: "MAC<TAB>HOSTNAME" по строке)
-# Mode: --once (одно прохождение) или без аргумента (бесконечный цикл через 30s)
-
-VPN_MACS_FILE="/etc/podkop_data/vpn_macs.list"
-MODE="$1"
-
-resolve_one_pass() {
-  [ -s "$VPN_MACS_FILE" ] || {
-    # Список пуст -> очищаем uci, если там что-то есть
-    cur="$(uci -q get podkop.main.fully_routed_ips)"
-    [ -n "$cur" ] && {
-      uci -q delete podkop.main.fully_routed_ips
-      uci commit podkop
-      /etc/init.d/podkop reload >/dev/null 2>&1
-      logger -t rift-mac-vpn "Cleared fully_routed_ips (list empty)"
-    }
-    return 0
-  }
-
-  # Собрать NEW IPs из MAC-листа
-  NEW_IPS=""
-  while IFS=$(printf '\t') read -r MAC NAME; do
-    [ -z "$MAC" ] && continue
-    # Сначала ip neigh (актуальное состояние)
-    IP="$(ip -4 neigh show 2>/dev/null | awk -v m="$(echo "$MAC" | tr A-Z a-z)" 'tolower($5)==m && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1; exit}')"
-    # Fallback на dhcp.leases
-    if [ -z "$IP" ]; then
-      IP="$(awk -v m="$(echo "$MAC" | tr A-Z a-z)" 'tolower($2)==m {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
-    fi
-    [ -n "$IP" ] && NEW_IPS="$NEW_IPS $IP"
-  done < "$VPN_MACS_FILE"
-
-  # Нормализовать (trim + sort)
-  NEW_SORTED="$(echo "$NEW_IPS" | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' ' | sed 's/ $//')"
-  CUR_SORTED="$(uci -q get podkop.main.fully_routed_ips | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' ' | sed 's/ $//')"
-
-  if [ "$NEW_SORTED" != "$CUR_SORTED" ]; then
-    uci -q delete podkop.main.fully_routed_ips
-    for ip in $NEW_SORTED; do
-      uci add_list podkop.main.fully_routed_ips="$ip"
-    done
-    uci commit podkop
-    /etc/init.d/podkop reload >/dev/null 2>&1
-    logger -t rift-mac-vpn "fully_routed_ips updated: [$NEW_SORTED]"
-  fi
-}
-
-if [ "$MODE" = "--once" ]; then
-  resolve_one_pass
-  exit 0
+# MAC-VPN watcher отключён: «полный VPN» вернулся на IP-режим (как в старой
+# версии). Если предыдущая установка успела поставить watcher — убираем его,
+# иначе он каждые 30с затирал бы podkop.main.fully_routed_ips.
+logi "[9.5/10] MAC-VPN watcher отключён (IP-режим), очистка старого watcher..."
+if [ -x /etc/init.d/rift-mac-vpn-watcher ]; then
+  /etc/init.d/rift-mac-vpn-watcher stop >/dev/null 2>&1
+  /etc/init.d/rift-mac-vpn-watcher disable >/dev/null 2>&1
 fi
-
-# Daemon mode
-while :; do
-  resolve_one_pass
-  sleep 30
-done
-WEOF
-chmod +x /usr/local/sbin/rift-mac-vpn-watcher
-
-cat <<'IEOF' > /etc/init.d/rift-mac-vpn-watcher
-#!/bin/sh /etc/rc.common
-# RIFT MAC-VPN watcher: keeps podkop.main.fully_routed_ips in sync with /etc/podkop_data/vpn_macs.list
-
-USE_PROCD=1
-START=99
-STOP=10
-
-start_service() {
-    procd_open_instance
-    procd_set_param command /usr/local/sbin/rift-mac-vpn-watcher
-    procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-0}
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
-}
-
-reload_service() {
-    stop
-    start
-}
-IEOF
-chmod +x /etc/init.d/rift-mac-vpn-watcher
-/etc/init.d/rift-mac-vpn-watcher enable >/dev/null 2>&1
-/etc/init.d/rift-mac-vpn-watcher start >/dev/null 2>&1
-
-# Migrate v4.6→v4.7: если в uci есть старые fully_routed_ips но vpn_macs.list пуст,
-# попробуем восстановить MAC из текущего ip neigh для каждого IP и записать.
-# Это разовая операция при upgrade — после неё watcher возьмёт управление.
-if [ ! -s /etc/podkop_data/vpn_macs.list ]; then
-  OLD_IPS="$(uci -q get podkop.main.fully_routed_ips)"
-  if [ -n "$OLD_IPS" ]; then
-    echo "[9.5/10] Миграция fully_routed_ips IP→MAC..."
-    for ip in $OLD_IPS; do
-      MAC="$(ip -4 neigh show "$ip" 2>/dev/null | awk '/lladdr/ {print $5; exit}')"
-      [ -z "$MAC" ] && MAC="$(awk -v ip="$ip" '$3==ip {print $2; exit}' /tmp/dhcp.leases 2>/dev/null)"
-      NAME="$(awk -v ip="$ip" '$3==ip {print $4; exit}' /tmp/dhcp.leases 2>/dev/null)"
-      [ -z "$NAME" ] && NAME="$ip"
-      [ -n "$MAC" ] && echo "$MAC	$NAME" >> /etc/podkop_data/vpn_macs.list
-    done
-    # Триггерим watcher чтобы он перепрочитал и подтянул IP-список заново
-    /usr/local/sbin/rift-mac-vpn-watcher --once
-  fi
-fi
+rm -f /etc/init.d/rift-mac-vpn-watcher /usr/local/sbin/rift-mac-vpn-watcher
+rm -f /etc/podkop_data/vpn_macs.list
 # ----------------------------------------------------------------------------
 
 # Panel auto-update (daily)
