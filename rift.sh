@@ -1,5 +1,5 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (v4.11) ===
+# === RIFT PANEL INSTALLER & UPDATER (v4.12) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 #
 # v4.10 changes:
@@ -9,7 +9,7 @@
 #   - «Полный VPN» по MAC-адресу (watcher переставляет IP при переподключении)
 #   - Системные настройки: конфигурируемый URL обновления (по умолчанию router.rift.monster)
 
-PANEL_VERSION="4.11"
+PANEL_VERSION="4.12"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 # === MENU: detect existing installation ===
@@ -456,8 +456,20 @@ local function fetch_to_file(url, out, err, extra_headers)
   else
     cmd = "wget -q -T 25 -U "..shq(ua)..hdr.." -O "..out.." "..shq(url).." 2>"..err
   end
-  local rc = os.execute(cmd)
-  return (rc==0) or (rc==true)
+  -- v4.12: до 3 попыток — TSPU периодически рвёт TLS ("SSL connection EOF"),
+  -- следующая попытка обычно проходит. Успех = rc==0 И файл непустой.
+  local ok = false
+  for attempt=1,3 do
+    local rc = os.execute(cmd)
+    ok = (rc==0) or (rc==true)
+    if ok then
+      local f=io.open(out,"r"); local sz=f and (f:seek("end") or 0) or 0; if f then f:close() end
+      if sz>0 then break end
+      ok=false
+    end
+    if attempt<3 then os.execute("sleep 1") end
+  end
+  return ok
 end
 
 -- Fetch and capture response headers (for subscription info)
@@ -501,7 +513,7 @@ end
 -- полный набор, иначе Remnawave вернёт заглушки HWIDNotSupported вместо узлов.
 local function fetch_subscription_json(url, out, err)
   exec_silent("rm -f "..out.." "..err)
-  local ua = "Happ/4.11-RIFT"
+  local ua = "Happ/4.12-RIFT"
   local hwid = get_hwid()
   local model = get_device_model()
   local osver = get_os_version()
@@ -516,8 +528,18 @@ local function fetch_subscription_json(url, out, err)
   else
     cmd = "wget -q -T 25 -U "..shq(ua)..hdr.." -O "..out.." "..shq(url).." 2>"..err
   end
-  local rc = os.execute(cmd)
-  local okrc = (rc==0) or (rc==true)
+  -- v4.12: до 3 попыток против TSPU SSL-EOF. Успех = rc==0 И файл непустой.
+  local rc, okrc = nil, false
+  for attempt=1,3 do
+    rc = os.execute(cmd)
+    okrc = (rc==0) or (rc==true)
+    if okrc then
+      local f=io.open(out,"r"); local sz=f and (f:seek("end") or 0) or 0; if f then f:close() end
+      if sz>0 then break end
+      okrc=false
+    end
+    if attempt<3 then os.execute("sleep 1") end
+  end
   -- Один компактный dlog вместо двух (cron дёргает раз в час — экономим RAM-лог).
   dlog("fetch_sub rc="..tostring(rc).." ok="..tostring(okrc).." hwid="..hwid.." os="..osver.." url="..url)
   return okrc
@@ -1614,7 +1636,7 @@ if method=="update_subs" then
   -- Заголовки подписки (срок/имя/трафик) — отдельным HEAD-запросом тем же UA.
   local hdr_file="/tmp/podkop_sub.hdr"
   local sub_info = {expire="", title="", interval=""}
-  os.execute("curl -sI -A 'Happ/4.11-RIFT' "..shq(url).." >"..hdr_file.." 2>/dev/null")
+  os.execute("curl -sI -A 'Happ/4.12-RIFT' "..shq(url).." >"..hdr_file.." 2>/dev/null")
   local hdr_raw = exec_read("cat "..hdr_file.." 2>/dev/null")
   if hdr_raw ~= "" then sub_info = extract_sub_info(hdr_file) end
   os.remove(hdr_file)
@@ -1670,6 +1692,32 @@ if method=="update_subs" then
     f:write("return "..serialize(db))
     f:close()
     dlog("update_subs: nodes.lua written, real="..real)
+    -- v4.12: если применённый узел несовместим со штатным ядром (XHTTP из версии
+    -- на extended) — podkop не соберёт конфиг ("invalid, aborted"), VPN ляжет.
+    -- Авто-переключаем на рабочий узел того же сервера (или первый доступный).
+    -- Только при пересборке списка (не в hash-skip ветке), т.е. разово при апгрейде.
+    local cur_ob = trim(uci_get("podkop","main","outbound_json"))
+    if cur_ob:find('"type":"xhttp"',1,true) or cur_ob:find('"type":"splithttp"',1,true)
+       or cur_ob:find('"type":"http"',1,true) then
+      local prev_host = (exec_read("cat /etc/podkop_data/active_key 2>/dev/null") or ""):match("^([^:]+)")
+      local pick
+      for _,n in ipairs(nodes) do
+        if not n.is_separator and n.sb then
+          if prev_host and n.host == prev_host then pick = n; break end
+          if not pick then pick = n end
+        end
+      end
+      if pick then
+        uci_set("podkop","main","outbound_json",to_json(pick.sb))
+        exec_silent("uci set podkop.main.proxy_config_type='outbound'")
+        exec_silent("uci -q delete podkop.main.proxy_string")
+        exec_silent("uci commit podkop")
+        local af=io.open("/etc/podkop_data/active_key","w")
+        if af then af:write(pick.key or ""); af:close() end
+        restart_podkop_service()
+        dlog("update_subs: несовместимый XHTTP-узел заменён на "..tostring(pick.name).." ["..tostring(pick.transport).."]")
+      end
+    end
     print(to_json({status="ok", count=real, expire=db.expire, sub_title=db.sub_title, sub_traffic=traffic_str, updated=db.updated, updated_epoch=db.updated_epoch, changed=true}))
   else
     dlog("update_subs: nodes.lua write FAILED")
