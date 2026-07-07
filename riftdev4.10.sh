@@ -1,5 +1,5 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (v4.10) ===
+# === RIFT PANEL INSTALLER & UPDATER (v4.11) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 #
 # v4.10 changes:
@@ -9,7 +9,7 @@
 #   - «Полный VPN» по MAC-адресу (watcher переставляет IP при переподключении)
 #   - Системные настройки: конфигурируемый URL обновления (по умолчанию router.rift.monster)
 
-PANEL_VERSION="4.10"
+PANEL_VERSION="4.11"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 # === MENU: detect existing installation ===
@@ -200,6 +200,25 @@ if uci -q get podkop.settings >/dev/null 2>&1; then
 else
   logi "  -> секция podkop.settings не найдена (podkop не установлен?) — пропуск"
 fi
+
+# 4.6) Списки DNS для выпадающих меню панели (перезаписываются при каждом обновлении —
+#   так оператор «пушит» свои DNS с апгрейдом). Формат строки: "value|Подпись".
+#   Верх списка — наши/рекомендуемые, ниже — публичные. Оператор правит здесь.
+cat > /etc/podkop_data/dns_servers.list <<'DEOF'
+77.88.8.8|Yandex (77.88.8.8)
+77.88.8.7|Yandex Family (77.88.8.7)
+8.8.8.8|Google (8.8.8.8)
+1.1.1.1|Cloudflare (1.1.1.1)
+9.9.9.9|Quad9 (9.9.9.9)
+dns.adguard-dns.com|AdGuard (dns.adguard-dns.com)
+DEOF
+cat > /etc/podkop_data/dns_bootstraps.list <<'DEOF'
+77.88.8.8|Yandex (77.88.8.8)
+8.8.8.8|Google (8.8.8.8)
+1.1.1.1|Cloudflare (1.1.1.1)
+9.9.9.9|Quad9 (9.9.9.9)
+DEOF
+logi "  -> списки DNS для панели обновлены (dns_servers.list / dns_bootstraps.list)"
 
 # 5) v4.8: extended sing-box ОТКАЧЕН на штатный.
 # Причина: extended 1.13.x у части юзеров ломал routed-трафик (Telegram и др.).
@@ -623,6 +642,11 @@ print("Content-type: application/json; charset=utf-8\n")
 -- v4.8: URL обновления панели настраивается (uci podkop_subs.config.update_url)
 -- и правится через «Системные настройки» — если домен умрёт, юзер впишет другой.
 local DEFAULT_UPDATE_URL="https://router.rift.monster/rift.sh"
+-- Версия парсера/конвертера. Инсталлятор подставляет сюда PANEL_VERSION.
+-- Если версия сменилась — update_subs ПЕРЕсоберёт nodes.lua, даже если хэш
+-- подписки прежний (иначе изменения парсера, напр. скрытие XHTTP, не применятся
+-- к уже сохранённому списку).
+local PARSER_VER="__RIFT_PARSER_VER__"
 local function get_update_url()
   local u = trim(uci_get("podkop_subs","config","update_url"))
   if u == "" then u = DEFAULT_UPDATE_URL end
@@ -1615,8 +1639,9 @@ if method=="update_subs" then
   -- Не переписываем nodes.lua если подписка не изменилась (cron каждые 5 мин —
   -- иначе износ флеша). Сравниваем хэш XRAY_JSON-ответа.
   local has_existing, existing = pcall(dofile, "/etc/podkop_data/nodes.lua")
-  if has_existing and type(existing)=="table" and existing.source_hash==source_hash then
-    dlog("update_subs: подписка не изменилась (hash совпал) — nodes.lua не переписываю")
+  if has_existing and type(existing)=="table" and existing.source_hash==source_hash
+     and existing.parser_ver==PARSER_VER then
+    dlog("update_subs: подписка не изменилась (hash+parser совпали) — nodes.lua не переписываю")
     print(to_json({status="ok", count=real, expire=existing.expire or "No data",
       sub_title=existing.sub_title or "", sub_traffic=existing.sub_traffic or "",
       updated=existing.updated or "", updated_epoch=existing.updated_epoch or 0, changed=false}))
@@ -1631,7 +1656,8 @@ if method=="update_subs" then
     updated=os.date("!%Y-%m-%dT%H:%M:%SZ"),
     updated_epoch=os.time(),
     nodes=nodes,
-    source_hash=source_hash
+    source_hash=source_hash,
+    parser_ver=PARSER_VER
   }
   local f=io.open("/etc/podkop_data/nodes.lua","w")
   if f then
@@ -1918,11 +1944,46 @@ end
 -- v4.8: полноценный DNS-блок (как в podkop): тип (udp/dot/doh) + сервер + bootstrap.
 -- Пишем в podkop.settings.{dns_type,dns_server,bootstrap_dns_server}. Значения
 -- валидирует и конфиг генерит сам podkop; порт по типу (udp53/dot853/doh443).
+
+-- Читает список DNS для выпадающих меню из файла (строки "value|Подпись").
+-- Инсталлятор перезаписывает эти файлы при каждом апгрейде («пуш» от оператора).
+local function read_dns_options(path, fallback)
+  local out = {}
+  local f = io.open(path, "r")
+  if f then
+    for line in f:lines() do
+      line = trim(line)
+      if line ~= "" and line:sub(1,1) ~= "#" then
+        local v, l = line:match("^(.-)|(.+)$")
+        if not v or v == "" then v = line; l = line end
+        out[#out+1] = { v = trim(v), l = trim(l) }
+      end
+    end
+    f:close()
+  end
+  if #out == 0 then return fallback end
+  return out
+end
+
 if method=="get_dns_settings" then
+  local servers = read_dns_options("/etc/podkop_data/dns_servers.list", {
+    {v="77.88.8.8", l="Yandex (77.88.8.8)"},
+    {v="8.8.8.8",   l="Google (8.8.8.8)"},
+    {v="1.1.1.1",   l="Cloudflare (1.1.1.1)"},
+    {v="9.9.9.9",   l="Quad9 (9.9.9.9)"},
+  })
+  local bootstraps = read_dns_options("/etc/podkop_data/dns_bootstraps.list", {
+    {v="77.88.8.8", l="Yandex (77.88.8.8)"},
+    {v="8.8.8.8",   l="Google (8.8.8.8)"},
+    {v="1.1.1.1",   l="Cloudflare (1.1.1.1)"},
+    {v="9.9.9.9",   l="Quad9 (9.9.9.9)"},
+  })
   print(to_json({
     dns_type = trim(uci_get("podkop","settings","dns_type")),
     dns_server = trim(uci_get("podkop","settings","dns_server")),
-    bootstrap_dns_server = trim(uci_get("podkop","settings","bootstrap_dns_server"))
+    bootstrap_dns_server = trim(uci_get("podkop","settings","bootstrap_dns_server")),
+    servers = servers,
+    bootstraps = bootstraps
   }))
   os.exit(0)
 end
@@ -2070,6 +2131,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     .dns-select{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;width:100%;font-size:12px;font-family:inherit;outline:none}
     .dns-select:focus{border-color:var(--accent)}
     .dns-select option{background:var(--card);color:var(--text)}
+    .dns-label{font-size:11px;color:var(--text-sec);letter-spacing:.02em}
     input[type=text]:focus{border-color:var(--accent)}
     input[type=text]::placeholder{color:var(--text-sec)}
     .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,14,26,.85);backdrop-filter:blur(8px);z-index:9999;display:none;flex-direction:column;justify-content:center;align-items:center}
@@ -2169,15 +2231,18 @@ cat <<'EOF' > /www/podkop_panel/index.html
     </div>
     <div class="card">
       <h3>DNS</h3>
-      <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="dns-label">&#1058;&#1080;&#1087; &#1087;&#1088;&#1086;&#1090;&#1086;&#1082;&#1086;&#1083;&#1072; DNS</label>
         <select id="dns_type" class="dns-select">
           <option value="doh">DNS &#1095;&#1077;&#1088;&#1077;&#1079; HTTPS (DoH)</option>
           <option value="dot">DNS &#1095;&#1077;&#1088;&#1077;&#1079; TLS (DoT)</option>
           <option value="udp">UDP (&#1053;&#1077;&#1079;&#1072;&#1097;&#1080;&#1097;&#1105;&#1085;&#1085;&#1099;&#1081; DNS)</option>
         </select>
-        <input type="text" id="dns_server" placeholder="DNS-&#1089;&#1077;&#1088;&#1074;&#1077;&#1088; (IP &#1080;&#1083;&#1080; URL)">
-        <input type="text" id="dns_bootstrap" placeholder="Bootstrap DNS-&#1089;&#1077;&#1088;&#1074;&#1077;&#1088; (IP)">
-        <button class="btn btn-primary" onclick="saveDns()">&#1057;&#1086;&#1093;&#1088;&#1072;&#1085;&#1080;&#1090;&#1100; DNS</button>
+        <label class="dns-label" style="margin-top:8px">DNS-&#1089;&#1077;&#1088;&#1074;&#1077;&#1088;</label>
+        <select id="dns_server" class="dns-select"></select>
+        <label class="dns-label" style="margin-top:8px">Bootstrap DNS-&#1089;&#1077;&#1088;&#1074;&#1077;&#1088;</label>
+        <select id="dns_bootstrap" class="dns-select"></select>
+        <button class="btn btn-primary" style="margin-top:10px" onclick="saveDns()">&#1057;&#1086;&#1093;&#1088;&#1072;&#1085;&#1080;&#1090;&#1100; DNS</button>
       </div>
     </div>
     <div class="card">
@@ -2356,16 +2421,34 @@ cat <<'EOF' > /www/podkop_panel/index.html
     const code=getFlagCode(node&&node.name||'');
     return {title,code,flagHtml:renderFlag(code)};
   }
+  // Заполняет <select> опциями из списка [{v,l}], выбирает current.
+  // Если current нет в списке (кастомное значение уже стоит в podkop) — добавляем его.
+  function fillSelect(el,list,current){
+    if(!el)return;
+    el.innerHTML='';
+    let found=false;
+    (list||[]).forEach(o=>{
+      const opt=document.createElement('option');
+      opt.value=o.v; opt.textContent=o.l||o.v;
+      if(o.v===current)found=true;
+      el.appendChild(opt);
+    });
+    if(current&&!found){
+      const opt=document.createElement('option');
+      opt.value=current; opt.textContent=current+' (текущий)';
+      el.appendChild(opt);
+    }
+    if(current)el.value=current;
+  }
   function renderDnsSettings(s){
     dnsProtectionState=s||null;
     const typeEl=document.getElementById('dns_type');
-    const srvEl=document.getElementById('dns_server');
-    const bootEl=document.getElementById('dns_bootstrap');
-    if(!typeEl||!srvEl||!bootEl)return;
-    const t=String((s&&s.dns_type)||'').toLowerCase();
-    if(t==='udp'||t==='dot'||t==='doh')typeEl.value=t;
-    srvEl.value=(s&&s.dns_server)||'';
-    bootEl.value=(s&&s.bootstrap_dns_server)||'';
+    if(typeEl){
+      const t=String((s&&s.dns_type)||'').toLowerCase();
+      if(t==='udp'||t==='dot'||t==='doh')typeEl.value=t;
+    }
+    fillSelect(document.getElementById('dns_server'), s&&s.servers, s&&s.dns_server);
+    fillSelect(document.getElementById('dns_bootstrap'), s&&s.bootstraps, s&&s.bootstrap_dns_server);
   }
   async function api(method,params={}){
     params.method=method;
@@ -2524,8 +2607,8 @@ cat <<'EOF' > /www/podkop_panel/index.html
     if(!dns_server){showToast(RU.dns_server_empty,8000);return;}
     showLoader();
     try{
-      const r=await api('set_dns_settings',{dns_type,dns_server,bootstrap});
-      renderDnsSettings(r);
+      await api('set_dns_settings',{dns_type,dns_server,bootstrap});
+      await loadDnsSettings();   // перечитываем со списками (ответ set не содержит опций)
       showToast(RU.dns_saved,8000);
     }catch(e){
       showToast(RU.dns_save_failed+': '+e.message,10000);
@@ -2759,6 +2842,7 @@ chmod +x /etc/podkop_data/autoupdate_sub.sh
 
 # 8.5) MAC-VPN watcher (v4.8): синхронит podkop.main.fully_routed_ips с vpn_macs.list.
 logi "[9.5/10] Установка MAC-VPN watcher..."
+mkdir -p /usr/local/sbin   # на минимальных OpenWrt этой папки может не быть
 touch /etc/podkop_data/vpn_macs.list
 
 cat <<'WEOF' > /usr/local/sbin/rift-mac-vpn-watcher
@@ -2883,6 +2967,12 @@ logi "[10/10] Настройка cron..."
 # finish
 chmod +x /www/podkop_panel/cgi-bin/rpc
 sed -i 's/\r$//' /www/podkop_panel/cgi-bin/rpc
+# Подставляем версию парсера — при апгрейде update_subs пересоберёт nodes.lua
+# (иначе изменения конвертера, напр. скрытие XHTTP, не применятся к старому списку).
+sed -i "s/__RIFT_PARSER_VER__/${PANEL_VERSION}/" /www/podkop_panel/cgi-bin/rpc
+# Сбрасываем сохранённый список узлов: заставит первый update_subs пересобрать
+# его новым конвертером (быстро самолечится через cron/refresh).
+rm -f /etc/podkop_data/nodes.lua
 /etc/init.d/uhttpd enable >/dev/null 2>&1
 # Рестарты сети откладываем в фон на 3с: при `sh <(wget ...)` рестарт dnsmasq
 # здесь рвёт ещё не докачанный хвост pipe → "stalled / timed out". Фон даёт
@@ -2890,6 +2980,10 @@ sed -i 's/\r$//' /www/podkop_panel/cgi-bin/rpc
 ( sleep 3
   /etc/init.d/uhttpd restart >/dev/null 2>&1
   /etc/init.d/dnsmasq reload  >/dev/null 2>&1
+  # После рестарта uhttpd пересобираем список узлов новым конвертером
+  # (nodes.lua мы удалили выше) — чтобы XHTTP-узлы сразу исчезли, не ждать cron.
+  sleep 3
+  /etc/podkop_data/autoupdate_sub.sh >/dev/null 2>&1
 ) >/dev/null 2>&1 &
 
 logi "================================================="
