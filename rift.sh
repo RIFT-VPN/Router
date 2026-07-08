@@ -1568,7 +1568,10 @@ if method=="perform_update" then
   local tmp="/tmp/rift_update.sh"
   local err="/tmp/rift_update.err"
   fetch_to_file(get_update_url(), tmp, err)
-  local raw = exec_read("head -n 5 "..tmp.." 2>/dev/null")
+  -- PANEL_VERSION= лежит глубже 5-й строки (длинный comment-хедер), поэтому
+  -- грепаем ВЕСЬ файл, а не head -n 5 — иначе кнопка «Обновить» ложно падает
+  -- с "Update script download failed" на валидном скрипте.
+  local raw = exec_read("grep -m1 PANEL_VERSION= "..tmp.." 2>/dev/null")
   if raw == "" or not raw:match('PANEL_VERSION="') then
     print('{"status":"error","msg":"Update script download failed"}')
     os.remove(tmp); os.remove(err); os.exit(0)
