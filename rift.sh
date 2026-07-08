@@ -1,7 +1,15 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (v4.12) ===
+# === RIFT PANEL INSTALLER & UPDATER (v4.13) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 #
+# v4.13 changes (критичные фиксы клиентов):
+#   - НЕ ставим/апгрейдим curl (opkg ломал его: curl новее libcurl -> "symbol not found"),
+#     podkop не мог качать github-списки -> у клиентов резалось Telegram/Discord. + авто-починка
+#     битого curl (opkg install libcurl4).
+#   - DNS: миграция dns_type=doh -> udp (TSPU режет DoH: домены/github не резолвятся).
+#   - update_subs авто-переключает несовместимый XHTTP-узел (после отката ядра) на рабочий.
+#   - ретраи fetch (до 3x) против TSPU SSL-EOF.
+#   - подписка обновляется раз в час; убран лишний флеш-коммит podkop_subs.
 # v4.10 changes:
 #   - Откат ядра extended -> штатный sing-box (extended ломал routed-трафик)
 #   - XHTTP-узлы скрыты (работают только на extended)
@@ -9,7 +17,7 @@
 #   - «Полный VPN» по MAC-адресу (watcher переставляет IP при переподключении)
 #   - Системные настройки: конфигурируемый URL обновления (по умолчанию router.rift.monster)
 
-PANEL_VERSION="4.12"
+PANEL_VERSION="4.13"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
 
 # === MENU: detect existing installation ===
@@ -107,8 +115,18 @@ logi(){ echo "$*"; echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$INSTALL_LOG" 2>
 # 1) deps
 logi "[1/10] Установка пакетов (opkg)..."
 opkg update >>"$INSTALL_LOG" 2>&1
-opkg install ca-bundle coreutils-base64 lua uclient-fetch curl >>"$INSTALL_LOG" 2>&1 || true
-logi "  -> lua=$(command -v lua || echo НЕТ) uclient-fetch=$(command -v uclient-fetch || echo НЕТ) curl=$(command -v curl || echo НЕТ)"
+# ВАЖНО: curl НЕ ставим/апгрейдим. opkg ставит curl новее, чем установленный libcurl
+# (напр. curl 8.19 vs libcurl 8.12) → ABI-облом "symbol not found" → curl не запускается,
+# а podkop им проверяет/качает community-списки с github → списки не грузятся, у клиента
+# режется Telegram/Discord (DC по IP). curl уже есть как зависимость podkop.
+opkg install ca-bundle coreutils-base64 lua uclient-fetch >>"$INSTALL_LOG" 2>&1 || true
+# Если curl уже сломан прошлой версией панели — чиним апгрейдом libcurl4 под текущий curl.
+if command -v curl >/dev/null 2>&1 && ! curl --version >/dev/null 2>&1; then
+  logi "  -> curl сломан (libcurl рассинхрон) — апгрейд libcurl4..."
+  opkg install libcurl4 >>"$INSTALL_LOG" 2>&1
+  if curl --version >/dev/null 2>&1; then logi "  -> curl починен: $(curl --version 2>/dev/null | head -1)"; else logi "  -> ВНИМАНИЕ: curl всё ещё сломан"; fi
+fi
+logi "  -> lua=$(command -v lua || echo НЕТ) uclient-fetch=$(command -v uclient-fetch || echo НЕТ) curl=$(curl --version >/dev/null 2>&1 && echo OK || echo СЛОМАН/НЕТ)"
 
 # 2) structure
 logi "[2/10] Настройка системы..."
@@ -185,14 +203,22 @@ uci commit dhcp >/dev/null 2>&1
 
 # 4.5) DNS-дефолты podkop (оператор задаёт здесь; чинит старые podkop без 77.88.8.8).
 #   RIFT_DNS_FORCE=0 -> проставляем только если ключ пуст/отсутствует; =1 -> всегда перезаписать.
-#   Применяется при ближайшем рестарте podkop (откат ниже / первое подключение узла).
+#   RIFT_DNS_MIGRATE_DOH=1 -> если сейчас dns_type=doh (в РФ TSPU режет DoH: домены/github не
+#     резолвятся, у клиента отваливается Telegram/Discord) — принудительно перевести на udp,
+#     НЕ трогая тех, кто уже на udp/dot. Это массовый фикс v4.12.
 RIFT_DNS_TYPE="udp"
 RIFT_DNS_SERVER="77.88.8.8"
 RIFT_DNS_BOOTSTRAP="77.88.8.8"
 RIFT_DNS_FORCE="0"
-logi "[4.5/10] DNS-дефолты podkop (force=${RIFT_DNS_FORCE})..."
+RIFT_DNS_MIGRATE_DOH="1"
+logi "[4.5/10] DNS-дефолты podkop (force=${RIFT_DNS_FORCE}, migrate_doh=${RIFT_DNS_MIGRATE_DOH})..."
 if uci -q get podkop.settings >/dev/null 2>&1; then
-  _dns_def(){ [ -n "$2" ] || return 0; local c; c="$(uci -q get podkop.settings.$1)"; if [ "$RIFT_DNS_FORCE" = "1" ] || [ -z "$c" ]; then uci set podkop.settings.$1="$2"; logi "  -> podkop.settings.$1=$2 (было: '${c:-пусто}')"; fi; }
+  _dns_force="$RIFT_DNS_FORCE"
+  if [ "$RIFT_DNS_MIGRATE_DOH" = "1" ] && [ "$(uci -q get podkop.settings.dns_type)" = "doh" ]; then
+    _dns_force="1"
+    logi "  -> текущий DNS=doh (режется TSPU) — принудительно перевожу на udp-дефолты"
+  fi
+  _dns_def(){ [ -n "$2" ] || return 0; local c; c="$(uci -q get podkop.settings.$1)"; if [ "$_dns_force" = "1" ] || [ -z "$c" ]; then uci set podkop.settings.$1="$2"; logi "  -> podkop.settings.$1=$2 (было: '${c:-пусто}')"; fi; }
   _dns_def dns_type "$RIFT_DNS_TYPE"
   _dns_def dns_server "$RIFT_DNS_SERVER"
   _dns_def bootstrap_dns_server "$RIFT_DNS_BOOTSTRAP"
@@ -513,7 +539,7 @@ end
 -- полный набор, иначе Remnawave вернёт заглушки HWIDNotSupported вместо узлов.
 local function fetch_subscription_json(url, out, err)
   exec_silent("rm -f "..out.." "..err)
-  local ua = "Happ/4.12-RIFT"
+  local ua = "Happ/4.13-RIFT"
   local hwid = get_hwid()
   local model = get_device_model()
   local osver = get_os_version()
@@ -1636,7 +1662,7 @@ if method=="update_subs" then
   -- Заголовки подписки (срок/имя/трафик) — отдельным HEAD-запросом тем же UA.
   local hdr_file="/tmp/podkop_sub.hdr"
   local sub_info = {expire="", title="", interval=""}
-  os.execute("curl -sI -A 'Happ/4.12-RIFT' "..shq(url).." >"..hdr_file.." 2>/dev/null")
+  os.execute("curl -sI -A 'Happ/4.13-RIFT' "..shq(url).." >"..hdr_file.." 2>/dev/null")
   local hdr_raw = exec_read("cat "..hdr_file.." 2>/dev/null")
   if hdr_raw ~= "" then sub_info = extract_sub_info(hdr_file) end
   os.remove(hdr_file)
