@@ -1,15 +1,24 @@
 #!/bin/sh
-# === RIFT PANEL INSTALLER & UPDATER (v4.7) ===
+# === RIFT PANEL INSTALLER & UPDATER (v4.13) ===
 # Install: sh <(wget -O - https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh)
 #
-# v4.7 changes (vs v4.6):
-#   - SVG-флаги для ~50 стран (вместо 4)
-#   - Разделители ㅤ (U+3164) рендерятся как тонкая линия без кнопок
-#   - MAC-based «полный VPN»: storage MAC + watcher daemon обновляет IP при переподключении
+# v4.13 changes (критичные фиксы клиентов):
+#   - НЕ ставим/апгрейдим curl (opkg ломал его: curl новее libcurl -> "symbol not found"),
+#     podkop не мог качать github-списки -> у клиентов резалось Telegram/Discord. + авто-починка
+#     битого curl (opkg install libcurl4).
+#   - DNS: миграция dns_type=doh -> udp (TSPU режет DoH: домены/github не резолвятся).
+#   - update_subs авто-переключает несовместимый XHTTP-узел (после отката ядра) на рабочий.
+#   - ретраи fetch (до 3x) против TSPU SSL-EOF.
+#   - подписка обновляется раз в час; убран лишний флеш-коммит podkop_subs.
+# v4.10 changes:
+#   - Откат ядра extended -> штатный sing-box (extended ломал routed-трафик)
+#   - XHTTP-узлы скрыты (работают только на extended)
+#   - DNS-блок в панели: тип (udp/dot/doh) + сервер + bootstrap; пуш дефолтов из скрипта
+#   - «Полный VPN» по MAC-адресу (watcher переставляет IP при переподключении)
+#   - Системные настройки: конфигурируемый URL обновления (по умолчанию router.rift.monster)
 
-PANEL_VERSION="4.10"
+PANEL_VERSION="4.13"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
-EXT_SINGBOX_INSTALL_URL="https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh"
 
 # === MENU: detect existing installation ===
 if [ -f /etc/podkop_data/version ]; then
@@ -82,132 +91,6 @@ get_singbox_version() {
   /usr/bin/sing-box version 2>/dev/null | head -n 1
 }
 
-singbox_supports_xhttp() {
-  [ -x /usr/bin/sing-box ] || return 1
-  cat > /tmp/rift_xhttp_check.json <<'JSON'
-{
-  "log": { "disabled": true },
-  "inbounds": [],
-  "outbounds": [
-    {
-      "type": "vless",
-      "tag": "test-out",
-      "server": "example.com",
-      "server_port": 443,
-      "uuid": "11111111-1111-1111-1111-111111111111",
-      "tls": {
-        "enabled": true,
-        "server_name": "example.com",
-        "insecure": true,
-        "alpn": ["h2", "http/1.1"]
-      },
-      "transport": {
-        "type": "xhttp",
-        "path": "/",
-        "mode": "auto",
-        "host": "example.com",
-        "x_padding_bytes": "100-1000"
-      }
-    }
-  ]
-}
-JSON
-  /usr/bin/sing-box check -c /tmp/rift_xhttp_check.json >/tmp/rift_xhttp_check.log 2>&1
-  local rc=$?
-  rm -f /tmp/rift_xhttp_check.json /tmp/rift_xhttp_check.log
-  return $rc
-}
-
-# Map device arch -> shtorm-7/sing-box-extended asset suffix
-_singbox_arch_suffix() {
-  local a; a=$(uname -m)
-  if [ -f /etc/openwrt_release ]; then
-    local da; da=$(. /etc/openwrt_release; echo "$DISTRIB_ARCH")
-    case "$da" in
-      *mips64el*|*mips64le*) a=mips64el ;;
-      *mipsel*|*mipsle*) a=mipsel ;;
-    esac
-  fi
-  case "$a" in
-    aarch64) echo arm64 ;;
-    armv7*) echo armv7 ;;
-    armv6*) echo armv6 ;;
-    x86_64) echo amd64 ;;
-    i386|i686) echo 386 ;;
-    mips) echo mips-softfloat ;;
-    mipsel|mipsle) echo mipsle-softfloat ;;
-    mips64) echo mips64 ;;
-    mips64el|mips64le) echo mips64le ;;
-    riscv64) echo riscv64 ;;
-    s390x) echo s390x ;;
-    *) echo "" ;;
-  esac
-}
-
-# Неинтерактивная установка sing-box-extended (заменяет штатный /usr/bin/sing-box).
-# Скачивает последний стабильный релиз, ПРОВЕРЯЕТ что бинарь запускается на устройстве,
-# делает бэкап старого, только потом подменяет. На любой ошибке штатный бинарь не трогается.
-install_extended_singbox() {
-  local api="https://api.github.com/repos/shtorm-7/sing-box-extended/releases?per_page=30"
-  local suffix; suffix=$(_singbox_arch_suffix)
-  [ -n "$suffix" ] || { echo "  -> неизвестная архитектура $(uname -m)"; return 1; }
-
-  local FETCH DL
-  if command -v curl >/dev/null 2>&1; then
-    FETCH="curl -fsSL --connect-timeout 20"; DL="curl -fsSL --connect-timeout 20 -o"
-  elif command -v uclient-fetch >/dev/null 2>&1; then
-    FETCH="uclient-fetch -q -O -"; DL="uclient-fetch -q -O"
-  else
-    FETCH="wget -qO-"; DL="wget -qO"
-  fi
-
-  local tag
-  tag=$($FETCH "$api" 2>/dev/null | tr ',' '\n' | grep '"tag_name"' \
-        | awk -F '"' '{print $4}' | grep -viE 'rc|beta|alpha' | head -n1)
-  [ -n "$tag" ] || { echo "  -> не удалось получить версию extended (нет сети/GitHub API)"; return 1; }
-
-  local url
-  url=$($FETCH "https://api.github.com/repos/shtorm-7/sing-box-extended/releases/tags/$tag" 2>/dev/null \
-        | tr ',' '\n' | grep browser_download_url | grep "linux-$suffix.tar.gz" \
-        | head -n1 | awk -F '"' '{print $4}')
-  [ -n "$url" ] || { echo "  -> нет сборки под $suffix в релизе $tag"; return 1; }
-
-  local wd=/tmp/rift_sbx; rm -rf "$wd"; mkdir -p "$wd" || return 1
-  $DL "$wd/sb.tar.gz" "$url" 2>/dev/null || { echo "  -> ошибка скачивания extended"; rm -rf "$wd"; return 1; }
-  [ -s "$wd/sb.tar.gz" ] || { echo "  -> пустой архив extended"; rm -rf "$wd"; return 1; }
-  tar -xzf "$wd/sb.tar.gz" -C "$wd" 2>/dev/null || { echo "  -> ошибка распаковки extended"; rm -rf "$wd"; return 1; }
-
-  local bin; bin=$(find "$wd" -type f -name sing-box | head -n1)
-  [ -n "$bin" ] || { echo "  -> бинарь не найден в архиве"; rm -rf "$wd"; return 1; }
-  chmod +x "$bin"
-  # Проверяем что скачанный бинарь реально запускается на этом устройстве ДО подмены живого
-  "$bin" version >/dev/null 2>&1 || { echo "  -> скачанный бинарь не запускается на устройстве"; rm -rf "$wd"; return 1; }
-
-  # Бэкап штатного бинаря один раз (для ручного отката)
-  mkdir -p /etc/podkop_data
-  if [ -x /usr/bin/sing-box ] && [ ! -f /etc/podkop_data/sing-box.stock.bak ]; then
-    cp /usr/bin/sing-box /etc/podkop_data/sing-box.stock.bak 2>/dev/null || true
-  fi
-
-  /etc/init.d/podkop stop >/dev/null 2>&1 || true
-  sleep 1
-  mv -f "$bin" /usr/bin/sing-box || { echo "  -> не удалось заменить бинарь"; rm -rf "$wd"; /etc/init.d/podkop start >/dev/null 2>&1; return 1; }
-  chmod +x /usr/bin/sing-box
-  rm -rf "$wd"
-  /etc/init.d/podkop start >/dev/null 2>&1 || true
-  return 0
-}
-
-ensure_xhttp_singbox() {
-  if singbox_supports_xhttp; then
-    echo "  -> sing-box уже поддерживает XHTTP: $(get_singbox_version)"
-    return 0
-  fi
-  echo "  -> обнаружен обычный sing-box, ставлю sing-box-extended для XHTTP..."
-  install_extended_singbox || return 1
-  sleep 2
-  singbox_supports_xhttp
-}
 
 # === Подробный лог установки (для диагностики) ===
 mkdir -p /etc/podkop_data 2>/dev/null
@@ -232,8 +115,18 @@ logi(){ echo "$*"; echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$INSTALL_LOG" 2>
 # 1) deps
 logi "[1/10] Установка пакетов (opkg)..."
 opkg update >>"$INSTALL_LOG" 2>&1
-opkg install ca-bundle coreutils-base64 lua uclient-fetch curl >>"$INSTALL_LOG" 2>&1 || true
-logi "  -> lua=$(command -v lua || echo НЕТ) uclient-fetch=$(command -v uclient-fetch || echo НЕТ) curl=$(command -v curl || echo НЕТ)"
+# ВАЖНО: curl НЕ ставим/апгрейдим. opkg ставит curl новее, чем установленный libcurl
+# (напр. curl 8.19 vs libcurl 8.12) → ABI-облом "symbol not found" → curl не запускается,
+# а podkop им проверяет/качает community-списки с github → списки не грузятся, у клиента
+# режется Telegram/Discord (DC по IP). curl уже есть как зависимость podkop.
+opkg install ca-bundle coreutils-base64 lua uclient-fetch >>"$INSTALL_LOG" 2>&1 || true
+# Если curl уже сломан прошлой версией панели — чиним апгрейдом libcurl4 под текущий curl.
+if command -v curl >/dev/null 2>&1 && ! curl --version >/dev/null 2>&1; then
+  logi "  -> curl сломан (libcurl рассинхрон) — апгрейд libcurl4..."
+  opkg install libcurl4 >>"$INSTALL_LOG" 2>&1
+  if curl --version >/dev/null 2>&1; then logi "  -> curl починен: $(curl --version 2>/dev/null | head -1)"; else logi "  -> ВНИМАНИЕ: curl всё ещё сломан"; fi
+fi
+logi "  -> lua=$(command -v lua || echo НЕТ) uclient-fetch=$(command -v uclient-fetch || echo НЕТ) curl=$(curl --version >/dev/null 2>&1 && echo OK || echo СЛОМАН/НЕТ)"
 
 # 2) structure
 logi "[2/10] Настройка системы..."
@@ -244,6 +137,14 @@ if [ ! -s /etc/config/podkop_subs ]; then
   echo "config podkop_subs 'config'" > /etc/config/podkop_subs
 fi
 echo "${PANEL_VERSION}" > /etc/podkop_data/version
+
+# v4.8: источник обновлений панели (правится в «Системных настройках»).
+# Ставим дефолт только если не задан — юзерский выбор переживает апгрейды.
+if [ -z "$(uci -q get podkop_subs.config.update_url)" ]; then
+  uci set podkop_subs.config.update_url='https://router.rift.monster/rift.sh'
+  uci commit podkop_subs
+  logi "  -> update_url по умолчанию: https://router.rift.monster/rift.sh"
+fi
 
 # Generate HWID from multiple hardware sources (tamper-resistant)
 generate_hwid() {
@@ -300,24 +201,93 @@ uci -q delete dhcp.rift_panel_domain
 uci -q del_list dhcp.@dnsmasq[0].rebind_domain='rift'
 uci commit dhcp >/dev/null 2>&1
 
-# 5) sing-box-extended (нужен для XHTTP; HY2/TCP/gRPC тоже работают на нём).
-# v4.7: всегда ставим extended, заменяя штатный sing-box. JSON-пайплайн гоняет
-# все транспорты через outbound_json, поэтому facade-патч (XHTTP→HTTP) больше не нужен.
-logi "[5/10] sing-box-extended (для XHTTP/HY2)..."
-if singbox_supports_xhttp; then
-  logi "  -> уже extended: $(get_singbox_version) — пропускаю установку"
-else
-  logi "  -> штатный sing-box ($(get_singbox_version)) — ставлю extended..."
-  if install_extended_singbox >>"$INSTALL_LOG" 2>&1; then
-    if singbox_supports_xhttp; then
-      logi "  -> OK, extended установлен: $(get_singbox_version)"
-    else
-      logi "  -> ВНИМАНИЕ: бинарь заменён, но XHTTP-проверка не прошла ($(get_singbox_version))"
-    fi
-  else
-    logi "  -> ОШИБКА установки extended (см. $INSTALL_LOG). XHTTP-узлы работать не будут до повторной попытки."
+# 4.5) DNS-дефолты podkop (оператор задаёт здесь; чинит старые podkop без 77.88.8.8).
+#   RIFT_DNS_FORCE=0 -> проставляем только если ключ пуст/отсутствует; =1 -> всегда перезаписать.
+#   RIFT_DNS_MIGRATE_DOH=1 -> если сейчас dns_type=doh (в РФ TSPU режет DoH: домены/github не
+#     резолвятся, у клиента отваливается Telegram/Discord) — принудительно перевести на udp,
+#     НЕ трогая тех, кто уже на udp/dot. Это массовый фикс v4.12.
+RIFT_DNS_TYPE="udp"
+RIFT_DNS_SERVER="77.88.8.8"
+RIFT_DNS_BOOTSTRAP="77.88.8.8"
+RIFT_DNS_FORCE="0"
+RIFT_DNS_MIGRATE_DOH="1"
+logi "[4.5/10] DNS-дефолты podkop (force=${RIFT_DNS_FORCE}, migrate_doh=${RIFT_DNS_MIGRATE_DOH})..."
+if uci -q get podkop.settings >/dev/null 2>&1; then
+  _dns_force="$RIFT_DNS_FORCE"
+  if [ "$RIFT_DNS_MIGRATE_DOH" = "1" ] && [ "$(uci -q get podkop.settings.dns_type)" = "doh" ]; then
+    _dns_force="1"
+    logi "  -> текущий DNS=doh (режется TSPU) — принудительно перевожу на udp-дефолты"
   fi
+  _dns_def(){ [ -n "$2" ] || return 0; local c; c="$(uci -q get podkop.settings.$1)"; if [ "$_dns_force" = "1" ] || [ -z "$c" ]; then uci set podkop.settings.$1="$2"; logi "  -> podkop.settings.$1=$2 (было: '${c:-пусто}')"; fi; }
+  _dns_def dns_type "$RIFT_DNS_TYPE"
+  _dns_def dns_server "$RIFT_DNS_SERVER"
+  _dns_def bootstrap_dns_server "$RIFT_DNS_BOOTSTRAP"
+  uci commit podkop
+else
+  logi "  -> секция podkop.settings не найдена (podkop не установлен?) — пропуск"
 fi
+
+# 4.6) Списки DNS для выпадающих меню панели (перезаписываются при каждом обновлении —
+#   так оператор «пушит» свои DNS с апгрейдом). Формат строки: "value|Подпись".
+#   Верх списка — наши/рекомендуемые, ниже — публичные. Оператор правит здесь.
+cat > /etc/podkop_data/dns_servers.list <<'DEOF'
+77.88.8.8|Yandex (77.88.8.8)
+77.88.8.7|Yandex Family (77.88.8.7)
+8.8.8.8|Google (8.8.8.8)
+1.1.1.1|Cloudflare (1.1.1.1)
+9.9.9.9|Quad9 (9.9.9.9)
+dns.adguard-dns.com|AdGuard (dns.adguard-dns.com)
+DEOF
+cat > /etc/podkop_data/dns_bootstraps.list <<'DEOF'
+77.88.8.8|Yandex (77.88.8.8)
+8.8.8.8|Google (8.8.8.8)
+1.1.1.1|Cloudflare (1.1.1.1)
+9.9.9.9|Quad9 (9.9.9.9)
+DEOF
+logi "  -> списки DNS для панели обновлены (dns_servers.list / dns_bootstraps.list)"
+
+# 5) v4.8: extended sing-box ОТКАЧЕН на штатный.
+# Причина: extended 1.13.x у части юзеров ломал routed-трафик (Telegram и др.).
+# Штатный sing-box тянет TCP/gRPC/HY2 через outbound_json (проверено на роутере).
+# XHTTP на штатном НЕ работает — такие узлы панель скрывает (см. Backend/Frontend).
+logi "[5/10] sing-box: возврат на штатный (extended отключён)..."
+SB_VER_NOW="$(get_singbox_version)"
+case "$SB_VER_NOW" in
+  *extended*)
+    logi "  -> обнаружен extended ($SB_VER_NOW) — откатываю на штатный..."
+    /etc/init.d/podkop stop >/dev/null 2>&1
+    BK="/etc/podkop_data/sing-box.stock.bak"
+    BK_VER=""
+    [ -s "$BK" ] && BK_VER="$("$BK" version 2>/dev/null | head -1)"
+    case "$BK_VER" in
+      "")
+        logi "  -> бэкапа нет/битый — переустановка штатного через opkg..."
+        opkg update >>"$INSTALL_LOG" 2>&1
+        opkg install --force-reinstall sing-box >>"$INSTALL_LOG" 2>&1
+        ;;
+      *extended*)
+        logi "  -> бэкап тоже extended — переустановка через opkg..."
+        opkg update >>"$INSTALL_LOG" 2>&1
+        opkg install --force-reinstall sing-box >>"$INSTALL_LOG" 2>&1
+        ;;
+      *)
+        cp -f "$BK" /usr/bin/sing-box && chmod +x /usr/bin/sing-box
+        logi "  -> восстановлен штатный из бэкапа ($BK_VER)"
+        ;;
+    esac
+    /etc/init.d/podkop start >/dev/null 2>&1
+    logi "  -> после отката: $(get_singbox_version)"
+    ;;
+  "")
+    logi "  -> sing-box не найден — ставлю штатный через opkg..."
+    opkg update >>"$INSTALL_LOG" 2>&1
+    opkg install sing-box >>"$INSTALL_LOG" 2>&1
+    logi "  -> установлен: $(get_singbox_version)"
+    ;;
+  *)
+    logi "  -> уже штатный ($SB_VER_NOW) — откат не нужен"
+    ;;
+esac
 
 # 6) Backend (RPC)
 logi "[6/10] Запись Backend (RPC панели)..."
@@ -386,7 +356,7 @@ end
 function exec_silent(cmd) return os.execute(cmd..">/dev/null 2>&1") end
 
 -- Подробный лог работы панели (в RAM /tmp, без износа флеша). Виден через RPC get_logs.
--- РОТАЦИЯ: cron дёргает update_subs каждые 5 мин → лог рос бы бесконечно в tmpfs (RAM).
+-- РОТАЦИЯ: cron дёргает update_subs раз в час → лог рос бы бесконечно в tmpfs (RAM).
 -- При превышении лимита обрезаем до последних строк. RAM роутера мало — не копим.
 RIFT_PANEL_LOG = "/tmp/rift_panel.log"
 local RIFT_LOG_MAX = 65536   -- 64 КБ потолок (примерно 700 строк истории — с запасом)
@@ -512,8 +482,20 @@ local function fetch_to_file(url, out, err, extra_headers)
   else
     cmd = "wget -q -T 25 -U "..shq(ua)..hdr.." -O "..out.." "..shq(url).." 2>"..err
   end
-  local rc = os.execute(cmd)
-  return (rc==0) or (rc==true)
+  -- v4.12: до 3 попыток — TSPU периодически рвёт TLS ("SSL connection EOF"),
+  -- следующая попытка обычно проходит. Успех = rc==0 И файл непустой.
+  local ok = false
+  for attempt=1,3 do
+    local rc = os.execute(cmd)
+    ok = (rc==0) or (rc==true)
+    if ok then
+      local f=io.open(out,"r"); local sz=f and (f:seek("end") or 0) or 0; if f then f:close() end
+      if sz>0 then break end
+      ok=false
+    end
+    if attempt<3 then os.execute("sleep 1") end
+  end
+  return ok
 end
 
 -- Fetch and capture response headers (for subscription info)
@@ -557,7 +539,7 @@ end
 -- полный набор, иначе Remnawave вернёт заглушки HWIDNotSupported вместо узлов.
 local function fetch_subscription_json(url, out, err)
   exec_silent("rm -f "..out.." "..err)
-  local ua = "Happ/4.7-RIFT"
+  local ua = "Happ/4.13-RIFT"
   local hwid = get_hwid()
   local model = get_device_model()
   local osver = get_os_version()
@@ -572,9 +554,19 @@ local function fetch_subscription_json(url, out, err)
   else
     cmd = "wget -q -T 25 -U "..shq(ua)..hdr.." -O "..out.." "..shq(url).." 2>"..err
   end
-  local rc = os.execute(cmd)
-  local okrc = (rc==0) or (rc==true)
-  -- Один компактный dlog вместо двух (cron дёргает каждые 5 мин — экономим RAM-лог).
+  -- v4.12: до 3 попыток против TSPU SSL-EOF. Успех = rc==0 И файл непустой.
+  local rc, okrc = nil, false
+  for attempt=1,3 do
+    rc = os.execute(cmd)
+    okrc = (rc==0) or (rc==true)
+    if okrc then
+      local f=io.open(out,"r"); local sz=f and (f:seek("end") or 0) or 0; if f then f:close() end
+      if sz>0 then break end
+      okrc=false
+    end
+    if attempt<3 then os.execute("sleep 1") end
+  end
+  -- Один компактный dlog вместо двух (cron дёргает раз в час — экономим RAM-лог).
   dlog("fetch_sub rc="..tostring(rc).." ok="..tostring(okrc).." hwid="..hwid.." os="..osver.." url="..url)
   return okrc
 end
@@ -620,67 +612,6 @@ local function singbox_supports_xhttp()
   local logs = exec_read("tail -n 20 /tmp/rift_xhttp_check.log 2>/dev/null")
   os.remove("/tmp/rift_xhttp_check.log")
   return (rc==0) or (rc==true), logs
-end
-
-local function install_extended_singbox()
-  local tmp = "/tmp/rift_singbox_upgrade.sh"
-  local err = "/tmp/rift_singbox_upgrade.err"
-  local logf = "/tmp/rift_singbox_upgrade.log"
-  local ok = fetch_to_file(EXT_SINGBOX_INSTALL_URL, tmp, err)
-  if not ok then
-    return false, "Не удалось скачать установщик sing-box-extended"
-  end
-  exec_silent("chmod +x "..tmp)
-  local rc = os.execute("sh "..tmp.." >"..logf.." 2>&1")
-  local logs = exec_read("tail -n 40 "..logf.." 2>/dev/null")
-  os.remove(tmp)
-  os.remove(err)
-  os.remove(logf)
-  return (rc==0) or (rc==true), logs
-end
-
-local function ensure_singbox_xhttp()
-  local before = get_singbox_version()
-  local ok, details = singbox_supports_xhttp()
-  if ok then
-    return true, {
-      changed = false,
-      before = before,
-      after = before,
-      msg = "Current sing-box already supports XHTTP"
-    }
-  end
-
-  local upgraded, install_logs = install_extended_singbox()
-  if not upgraded then
-    return false, {
-      changed = false,
-      before = before,
-      after = get_singbox_version(),
-      msg = "Failed to install sing-box-extended",
-      logs = install_logs ~= "" and install_logs or details
-    }
-  end
-
-  local after = get_singbox_version()
-  local supported_after, check_logs = singbox_supports_xhttp()
-  if supported_after then
-    return true, {
-      changed = true,
-      before = before,
-      after = after,
-      msg = "Installed sing-box-extended with XHTTP support",
-      logs = install_logs
-    }
-  end
-
-  return false, {
-    changed = true,
-    before = before,
-    after = after,
-    msg = "sing-box was upgraded, but XHTTP validation still fails",
-    logs = check_logs ~= "" and check_logs or install_logs
-  }
 end
 
 -- Extract subscription info from saved headers
@@ -756,8 +687,19 @@ local method=params.method
 
 print("Content-type: application/json; charset=utf-8\n")
 
-local REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh"
-local EXT_SINGBOX_INSTALL_URL="https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh"
+-- v4.8: URL обновления панели настраивается (uci podkop_subs.config.update_url)
+-- и правится через «Системные настройки» — если домен умрёт, юзер впишет другой.
+local DEFAULT_UPDATE_URL="https://router.rift.monster/rift.sh"
+-- Версия парсера/конвертера. Инсталлятор подставляет сюда PANEL_VERSION.
+-- Если версия сменилась — update_subs ПЕРЕсоберёт nodes.lua, даже если хэш
+-- подписки прежний (иначе изменения парсера, напр. скрытие XHTTP, не применятся
+-- к уже сохранённому списку).
+local PARSER_VER="__RIFT_PARSER_VER__"
+local function get_update_url()
+  local u = trim(uci_get("podkop_subs","config","update_url"))
+  if u == "" then u = DEFAULT_UPDATE_URL end
+  return u
+end
 local DNS_PROTECT_TYPE="doh"
 local DNS_PROTECT_SERVER="8.8.8.8"
 local DNS_PROTECT_BOOTSTRAP="9.9.9.9"
@@ -1070,22 +1012,11 @@ local function convert_outbound(o)
     local g = ss.grpcSettings or {}
     ob.transport = { type="grpc", service_name = g.serviceName or "" }
     return ob
-  elseif p == "vless" and net == "xhttp" then
-    local ob = ob_vless_common(o)
-    local x = ss.xhttpSettings or {}
-    local pad = x.xPaddingBytes
-    if not pad or pad == "" then pad = "100-1000" end
-    ob.transport = {
-      type = "xhttp",
-      path = (x.path and x.path ~= "" and x.path) or "/",
-      mode = (x.mode and x.mode ~= "" and x.mode) or "auto",
-      x_padding_bytes = tostring(pad),
-    }
-    if x.host and x.host ~= "" then ob.transport.host = x.host end
-    -- ОБЯЗАТЕЛЬНО: xhttp over reality в sing-box-extended требует явный ALPN h2,
-    -- иначе туннель встаёт, но данные не идут (проверено на живом трафике).
-    ob.tls.alpn = { "h2" }
-    return ob
+  elseif p == "vless" and (net == "xhttp" or net == "splithttp") then
+    -- v4.8: XHTTP работает ТОЛЬКО на sing-box-extended, который мы откатили.
+    -- На штатном ядре xhttp-outbound невалиден → узел пропускаем целиком
+    -- (у каждого сервера в подписке всё равно есть tcp/grpc-варианты).
+    return nil
   elseif p == "hysteria" then
     local s = o.settings or {}
     local hs = ss.hysteriaSettings or {}
@@ -1615,7 +1546,7 @@ end
 if method=="check_for_update" then
   local tmp="/tmp/rift_remote.sh"
   local err="/tmp/rift_remote.err"
-  local ok = fetch_to_file(REMOTE_SCRIPT_URL, tmp, err)
+  local ok = fetch_to_file(get_update_url(), tmp, err)
   if not ok then
     print(to_json({status="error", msg="Не удалось скачать"}))
     os.remove(tmp); os.remove(err); os.exit(0)
@@ -1636,8 +1567,11 @@ end
 if method=="perform_update" then
   local tmp="/tmp/rift_update.sh"
   local err="/tmp/rift_update.err"
-  fetch_to_file(REMOTE_SCRIPT_URL, tmp, err)
-  local raw = exec_read("head -n 5 "..tmp.." 2>/dev/null")
+  fetch_to_file(get_update_url(), tmp, err)
+  -- PANEL_VERSION= лежит глубже 5-й строки (длинный comment-хедер), поэтому
+  -- грепаем ВЕСЬ файл, а не head -n 5 — иначе кнопка «Обновить» ложно падает
+  -- с "Update script download failed" на валидном скрипте.
+  local raw = exec_read("grep -m1 PANEL_VERSION= "..tmp.." 2>/dev/null")
   if raw == "" or not raw:match('PANEL_VERSION="') then
     print('{"status":"error","msg":"Update script download failed"}')
     os.remove(tmp); os.remove(err); os.exit(0)
@@ -1646,16 +1580,6 @@ if method=="perform_update" then
   exec_silent("sh "..tmp)
   os.remove(tmp); os.remove(err)
   print('{"status":"ok"}')
-  os.exit(0)
-end
-
-if method=="upgrade_singbox" then
-  local ok, info = ensure_singbox_xhttp()
-  if ok then
-    print(to_json({status="ok", before=info.before, after=info.after, changed=info.changed, msg=info.msg, logs=info.logs or ""}))
-  else
-    print(to_json({status="error", msg=info.msg or "sing-box upgrade failed", before=info.before or "", after=info.after or "", logs=info.logs or ""}))
-  end
   os.exit(0)
 end
 
@@ -1706,15 +1630,21 @@ end
 
 if method=="update_subs" then
   local url=params.url
-  if not url or url=="" then url=trim(uci_get("podkop_subs","config","url")) end
+  local stored=trim(uci_get("podkop_subs","config","url"))
+  if not url or url=="" then url=stored end
   if not url or url=="" then
     dlog("update_subs: URL not found")
     print('{"status":"error","msg":"URL not found"}')
     os.exit(0)
   end
-  exec_silent("uci -q delete podkop_subs.config.url")
-  uci_set("podkop_subs","config","url",url)
-  exec_silent("uci commit podkop_subs")
+  -- Пишем URL в uci ТОЛЬКО если он реально изменился. Иначе cron (раз в час)
+  -- коммитил бы podkop_subs в флеш ~24 раз/сутки впустую — износ флеша.
+  if url ~= stored then
+    exec_silent("uci -q delete podkop_subs.config.url")
+    uci_set("podkop_subs","config","url",url)
+    exec_silent("uci commit podkop_subs")
+    dlog("update_subs: url changed -> saved")
+  end
   dlog("update_subs: start url="..url)
 
   -- JSON-пайплайн: тянем XRAY_JSON (Happ-UA) — единственный формат со всеми
@@ -1735,7 +1665,7 @@ if method=="update_subs" then
   -- Заголовки подписки (срок/имя/трафик) — отдельным HEAD-запросом тем же UA.
   local hdr_file="/tmp/podkop_sub.hdr"
   local sub_info = {expire="", title="", interval=""}
-  os.execute("curl -sI -A 'Happ/4.7-RIFT' "..shq(url).." >"..hdr_file.." 2>/dev/null")
+  os.execute("curl -sI -A 'Happ/4.13-RIFT' "..shq(url).." >"..hdr_file.." 2>/dev/null")
   local hdr_raw = exec_read("cat "..hdr_file.." 2>/dev/null")
   if hdr_raw ~= "" then sub_info = extract_sub_info(hdr_file) end
   os.remove(hdr_file)
@@ -1763,11 +1693,12 @@ if method=="update_subs" then
   local traffic_str = (sub_info.traffic_label and sub_info.traffic_label ~= "") and sub_info.traffic_label or ""
   local source_hash = hash_text(raw)
 
-  -- Не переписываем nodes.lua если подписка не изменилась (cron каждые 5 мин —
+  -- Не переписываем nodes.lua если подписка не изменилась (cron раз в час —
   -- иначе износ флеша). Сравниваем хэш XRAY_JSON-ответа.
   local has_existing, existing = pcall(dofile, "/etc/podkop_data/nodes.lua")
-  if has_existing and type(existing)=="table" and existing.source_hash==source_hash then
-    dlog("update_subs: подписка не изменилась (hash совпал) — nodes.lua не переписываю")
+  if has_existing and type(existing)=="table" and existing.source_hash==source_hash
+     and existing.parser_ver==PARSER_VER then
+    dlog("update_subs: подписка не изменилась (hash+parser совпали) — nodes.lua не переписываю")
     print(to_json({status="ok", count=real, expire=existing.expire or "No data",
       sub_title=existing.sub_title or "", sub_traffic=existing.sub_traffic or "",
       updated=existing.updated or "", updated_epoch=existing.updated_epoch or 0, changed=false}))
@@ -1782,13 +1713,40 @@ if method=="update_subs" then
     updated=os.date("!%Y-%m-%dT%H:%M:%SZ"),
     updated_epoch=os.time(),
     nodes=nodes,
-    source_hash=source_hash
+    source_hash=source_hash,
+    parser_ver=PARSER_VER
   }
   local f=io.open("/etc/podkop_data/nodes.lua","w")
   if f then
     f:write("return "..serialize(db))
     f:close()
     dlog("update_subs: nodes.lua written, real="..real)
+    -- v4.12: если применённый узел несовместим со штатным ядром (XHTTP из версии
+    -- на extended) — podkop не соберёт конфиг ("invalid, aborted"), VPN ляжет.
+    -- Авто-переключаем на рабочий узел того же сервера (или первый доступный).
+    -- Только при пересборке списка (не в hash-skip ветке), т.е. разово при апгрейде.
+    local cur_ob = trim(uci_get("podkop","main","outbound_json"))
+    if cur_ob:find('"type":"xhttp"',1,true) or cur_ob:find('"type":"splithttp"',1,true)
+       or cur_ob:find('"type":"http"',1,true) then
+      local prev_host = (exec_read("cat /etc/podkop_data/active_key 2>/dev/null") or ""):match("^([^:]+)")
+      local pick
+      for _,n in ipairs(nodes) do
+        if not n.is_separator and n.sb then
+          if prev_host and n.host == prev_host then pick = n; break end
+          if not pick then pick = n end
+        end
+      end
+      if pick then
+        uci_set("podkop","main","outbound_json",to_json(pick.sb))
+        exec_silent("uci set podkop.main.proxy_config_type='outbound'")
+        exec_silent("uci -q delete podkop.main.proxy_string")
+        exec_silent("uci commit podkop")
+        local af=io.open("/etc/podkop_data/active_key","w")
+        if af then af:write(pick.key or ""); af:close() end
+        restart_podkop_service()
+        dlog("update_subs: несовместимый XHTTP-узел заменён на "..tostring(pick.name).." ["..tostring(pick.transport).."]")
+      end
+    end
     print(to_json({status="ok", count=real, expire=db.expire, sub_title=db.sub_title, sub_traffic=traffic_str, updated=db.updated, updated_epoch=db.updated_epoch, changed=true}))
   else
     dlog("update_subs: nodes.lua write FAILED")
@@ -1894,10 +1852,12 @@ if method=="ping_all" then
 end
 
 -- ===========================================================================
--- "Полный VPN" по IP устройства (как в старой версии).
--- Список IP хранится в podkop.main.fully_routed_ips, UI оперирует IP.
--- MAC-режим (watcher + vpn_macs.list) отложен — helpers ниже оставлены
--- дормантными для будущей реализации, но НЕ вызываются.
+-- v4.8: «Полный VPN» по MAC-адресу устройства.
+-- Панель хранит MAC+hostname в /etc/podkop_data/vpn_macs.list. Watcher-демон
+-- (rift-mac-vpn-watcher) каждые 30с мапит MAC->текущий IP через ip neigh +
+-- dhcp.leases и синхронит podkop.main.fully_routed_ips. При переподключении
+-- устройства IP меняется — watcher сам переставит новый IP, привязка не слетает.
+-- UI оперирует MAC, а не IP.
 -- ===========================================================================
 local VPN_MACS_FILE = "/etc/podkop_data/vpn_macs.list"
 
@@ -1978,44 +1938,74 @@ if method=="get_network" then
   -- 2) Дополним из ip neigh (устройства со статической IP / без DHCP)
   local out = exec_read("ip -4 neigh show 2>/dev/null")
   for line in out:gmatch("[^\n]+") do
-    local ip, ll = line:match("^(%d+%.%d+%.%d+%.%d+).-lladdr%s+(%S+)")
-    if ip and ll and not seen_mac[ll:lower()] then
-      -- Только LAN-сеть (исключаем wan-шлюзы)
+    local ip, dev, ll = line:match("^(%d+%.%d+%.%d+%.%d+)%s+dev%s+(%S+).-lladdr%s+(%S+)")
+    -- Только LAN-интерфейсы (br-lan/br-*), НЕ wan — иначе в списке всплывает
+    -- upstream-шлюз (напр. 192.168.7.1 на dev wan, тоже 192.168.x).
+    if ip and dev and ll and not dev:match("wan") and not seen_mac[ll:lower()] then
       if ip:match("^192%.168%.") or ip:match("^10%.") or ip:match("^172%.") then
         seen_mac[ll:lower()] = true
         clients[#clients+1] = {mac = ll:lower(), ip = ip, name = ip}
       end
     end
   end
-  -- Активный список IP из podkop (то что юзер «включил VPN для»)
-  local vpn_ips = {}
-  for w in (exec_read("uci -q get podkop.main.fully_routed_ips") or ""):gmatch("%S+") do
-    vpn_ips[#vpn_ips+1] = w
+  -- Набор «включённых» MAC (с именами) из vpn_macs.list
+  local macs = read_vpn_macs()
+  local macname = {}
+  for _, m in ipairs(macs) do macname[m.mac] = m.name or "" end
+  -- Помечаем онлайн-клиентов флагом enabled
+  for _, c in ipairs(clients) do
+    c.enabled = (macname[c.mac] ~= nil)
+  end
+  -- Включённые, но сейчас офлайн (есть в списке, но нет среди онлайн-клиентов)
+  local offline = {}
+  for _, m in ipairs(macs) do
+    if not seen_mac[m.mac] then
+      offline[#offline+1] = {mac = m.mac, name = m.name ~= "" and m.name or m.mac}
+    end
   end
   -- Домены
   local domains = {}
   for w in (exec_read("uci -q get podkop.main.user_domains") or ""):gmatch("%S+") do
     domains[#domains+1] = w
   end
-  print(to_json({clients=clients, vpn_ips=vpn_ips, domains=domains}))
+  print(to_json({clients=clients, vpn_offline=offline, domains=domains}))
   os.exit(0)
 end
 
 if method=="manage_vpn" then
-  -- Полный VPN по IP устройства (как в старой версии). MAC-режим — позже.
-  local ip = params.ip
+  -- v4.8: оперируем MAC-ом. Watcher-демон сам переотразит MAC->IP.
+  local mac = (params.mac or ""):lower()
+  local name = params.name or ""
   local a = params.action
-  if ip and a and ip:match("^%d+%.%d+%.%d+%.%d+$") then
-    if a == "add" then
-      exec_silent("uci add_list podkop.main.fully_routed_ips="..shq(ip))
-    elseif a == "del" then
-      exec_silent("uci del_list podkop.main.fully_routed_ips="..shq(ip))
-    end
-    exec_silent("uci commit podkop"); exec_silent("/etc/init.d/podkop restart")
-    print('{"status":"ok"}')
-  else
-    print('{"status":"error","msg":"bad ip"}')
+  if mac == "" or not a then
+    print('{"status":"error","msg":"mac and action required"}'); os.exit(0)
   end
+  if not mac:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") then
+    print('{"status":"error","msg":"bad mac format"}'); os.exit(0)
+  end
+  local list = read_vpn_macs()
+  if a == "add" then
+    local found = false
+    for _, m in ipairs(list) do
+      if m.mac == mac then m.name = name; found = true; break end
+    end
+    if not found then list[#list+1] = {mac = mac, name = name} end
+  elseif a == "del" then
+    local new = {}
+    for _, m in ipairs(list) do
+      if m.mac ~= mac then new[#new+1] = m end
+    end
+    list = new
+  else
+    print('{"status":"error","msg":"bad action"}'); os.exit(0)
+  end
+  if not write_vpn_macs(list) then
+    print('{"status":"error","msg":"cannot write vpn_macs.list"}'); os.exit(0)
+  end
+  dlog("manage_vpn: "..a.." mac="..mac.." name="..name)
+  -- Немедленная пересборка IP-списка (не ждём 30с цикла watcher)
+  exec_silent("/usr/local/sbin/rift-mac-vpn-watcher --once 2>/dev/null")
+  print('{"status":"ok"}')
   os.exit(0)
 end
 
@@ -2034,40 +2024,111 @@ if method=="manage_domain" then
   os.exit(0)
 end
 
-if method=="get_dns_protection" then
-  local state = get_dns_protection_state()
-  print(to_json(state))
+-- v4.8: полноценный DNS-блок (как в podkop): тип (udp/dot/doh) + сервер + bootstrap.
+-- Пишем в podkop.settings.{dns_type,dns_server,bootstrap_dns_server}. Значения
+-- валидирует и конфиг генерит сам podkop; порт по типу (udp53/dot853/doh443).
+
+-- Читает список DNS для выпадающих меню из файла (строки "value|Подпись").
+-- Инсталлятор перезаписывает эти файлы при каждом апгрейде («пуш» от оператора).
+local function read_dns_options(path, fallback)
+  local out = {}
+  local f = io.open(path, "r")
+  if f then
+    for line in f:lines() do
+      line = trim(line)
+      if line ~= "" and line:sub(1,1) ~= "#" then
+        local v, l = line:match("^(.-)|(.+)$")
+        if not v or v == "" then v = line; l = line end
+        out[#out+1] = { v = trim(v), l = trim(l) }
+      end
+    end
+    f:close()
+  end
+  if #out == 0 then return fallback end
+  return out
+end
+
+if method=="get_dns_settings" then
+  local servers = read_dns_options("/etc/podkop_data/dns_servers.list", {
+    {v="77.88.8.8", l="Yandex (77.88.8.8)"},
+    {v="8.8.8.8",   l="Google (8.8.8.8)"},
+    {v="1.1.1.1",   l="Cloudflare (1.1.1.1)"},
+    {v="9.9.9.9",   l="Quad9 (9.9.9.9)"},
+  })
+  local bootstraps = read_dns_options("/etc/podkop_data/dns_bootstraps.list", {
+    {v="77.88.8.8", l="Yandex (77.88.8.8)"},
+    {v="8.8.8.8",   l="Google (8.8.8.8)"},
+    {v="1.1.1.1",   l="Cloudflare (1.1.1.1)"},
+    {v="9.9.9.9",   l="Quad9 (9.9.9.9)"},
+  })
+  print(to_json({
+    dns_type = trim(uci_get("podkop","settings","dns_type")),
+    dns_server = trim(uci_get("podkop","settings","dns_server")),
+    bootstrap_dns_server = trim(uci_get("podkop","settings","bootstrap_dns_server")),
+    servers = servers,
+    bootstraps = bootstraps
+  }))
   os.exit(0)
 end
 
-if method=="toggle_dns_protection" then
-  local enable = params.enable == "1" or params.enable == "true" or params.enable == "on"
-  local ok, state = apply_dns_profile(enable)
-  if ok then
-    print(to_json({
-      status = "ok",
-      active = state.active,
-      secure = state.secure,
-      dns_type = state.dns_type,
-      dns_server = state.dns_server,
-      bootstrap_dns_server = state.bootstrap_dns_server,
-      msg = enable and "DNS protection enabled" or "DNS protection disabled"
-    }))
-  else
-    print(to_json({
-      status = "error",
-      msg = "Podkop restart failed after DNS change",
-      active = state.active,
-      dns_type = state.dns_type,
-      dns_server = state.dns_server,
-      bootstrap_dns_server = state.bootstrap_dns_server
-    }))
+if method=="set_dns_settings" then
+  local dtype   = trim(params.dns_type or "")
+  local dserver = trim(params.dns_server or "")
+  local dboot   = trim(params.bootstrap or "")
+  -- тип строго из набора podkop (иначе facade делает fatal exit)
+  if dtype ~= "udp" and dtype ~= "dot" and dtype ~= "doh" then
+    print('{"status":"error","msg":"dns_type должен быть udp/dot/doh"}'); os.exit(0)
   end
+  if dserver == "" then
+    print('{"status":"error","msg":"DNS-сервер пуст"}'); os.exit(0)
+  end
+  -- dns_server: IP или URL/hostname (для DoH можно https://.../dns-query)
+  if not dserver:match("^[%w%.%:%-%_/%?=&]+$") then
+    print('{"status":"error","msg":"Некорректный DNS-сервер"}'); os.exit(0)
+  end
+  -- bootstrap ОБЯЗАН быть IPv4 (podkop им резолвит hostname DoH/DoT по UDP:53)
+  if dboot == "" then dboot = "77.88.8.8" end
+  if not dboot:match("^%d+%.%d+%.%d+%.%d+$") then
+    print('{"status":"error","msg":"Bootstrap DNS должен быть IPv4"}'); os.exit(0)
+  end
+  uci_set("podkop","settings","dns_type",dtype)
+  uci_set("podkop","settings","dns_server",dserver)
+  uci_set("podkop","settings","bootstrap_dns_server",dboot)
+  exec_silent("uci commit podkop")
+  dlog("set_dns: type="..dtype.." server="..dserver.." bootstrap="..dboot)
+  local ok = restart_podkop_service()
+  print(to_json({
+    status = ok and "ok" or "error",
+    dns_type = dtype, dns_server = dserver, bootstrap_dns_server = dboot,
+    msg = ok and "DNS обновлён" or "podkop не перезапустился после смены DNS"
+  }))
   os.exit(0)
 end
 
 if method=="get_sub_url" then
   print(to_json({url=uci_get("podkop_subs","config","url")}))
+  os.exit(0)
+end
+
+-- Системные настройки: URL источника обновлений панели.
+if method=="get_update_url" then
+  local f=io.open("/etc/podkop_data/version","r")
+  local v=f and trim(f:read("*a")) or "?"
+  if f then f:close() end
+  print(to_json({url=get_update_url(), default=DEFAULT_UPDATE_URL, panel_version=v}))
+  os.exit(0)
+end
+
+if method=="set_update_url" then
+  local u = trim(params.url or "")
+  if u == "" then u = DEFAULT_UPDATE_URL end
+  if not u:match("^https?://[%w%.%-:/%?=&_%%]+$") then
+    print('{"status":"error","msg":"Некорректный URL (нужен http/https)"}'); os.exit(0)
+  end
+  uci_set("podkop_subs","config","update_url",u)
+  exec_silent("uci commit podkop_subs")
+  dlog("set_update_url: "..u)
+  print(to_json({status="ok", url=u}))
   os.exit(0)
 end
 
@@ -2150,6 +2211,10 @@ cat <<'EOF' > /www/podkop_panel/index.html
     .sub-info{font-size:11px;color:rgba(255,255,255,.6);margin-top:4px;display:block}
     .input-group{display:flex;gap:8px;margin-top:12px}
     input[type=text]{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;width:100%;font-size:12px;font-family:inherit;outline:none}
+    .dns-select{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;width:100%;font-size:12px;font-family:inherit;outline:none}
+    .dns-select:focus{border-color:var(--accent)}
+    .dns-select option{background:var(--card);color:var(--text)}
+    .dns-label{font-size:11px;color:var(--text-sec);letter-spacing:.02em}
     input[type=text]:focus{border-color:var(--accent)}
     input[type=text]::placeholder{color:var(--text-sec)}
     .preloader-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,14,26,.85);backdrop-filter:blur(8px);z-index:9999;display:none;flex-direction:column;justify-content:center;align-items:center}
@@ -2192,6 +2257,24 @@ cat <<'EOF' > /www/podkop_panel/index.html
       <div id="logs_text" class="logs-text">&#1047;&#1072;&#1075;&#1088;&#1091;&#1079;&#1082;&#1072;...</div>
     </div>
   </div>
+  <div id="settingsModal" class="logs-modal" onclick="if(event.target===this)closeSettings()">
+    <div class="logs-content">
+      <div class="logs-header">
+        <h3 style="margin:0">&#1057;&#1080;&#1089;&#1090;&#1077;&#1084;&#1085;&#1099;&#1077; &#1085;&#1072;&#1089;&#1090;&#1088;&#1086;&#1081;&#1082;&#1080;</h3>
+        <button class="btn btn-outline" onclick="closeSettings()">&#1047;&#1072;&#1082;&#1088;&#1099;&#1090;&#1100;</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-size:12px;color:var(--text-sec)">&#1042;&#1077;&#1088;&#1089;&#1080;&#1103; &#1087;&#1072;&#1085;&#1077;&#1083;&#1080;: <b id="set_version" style="color:var(--accent)">&#8212;</b></div>
+        <label style="font-size:12px;color:var(--text-sec)">&#1048;&#1089;&#1090;&#1086;&#1095;&#1085;&#1080;&#1082; &#1086;&#1073;&#1085;&#1086;&#1074;&#1083;&#1077;&#1085;&#1080;&#1081; (URL)</label>
+        <input type="text" id="update_url" placeholder="https://router.rift.monster/rift.sh">
+        <div style="font-size:10px;color:var(--text-sec)">&#1055;&#1086; &#1091;&#1084;&#1086;&#1083;&#1095;&#1072;&#1085;&#1080;&#1102;: <span id="update_url_default"></span></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="saveUpdateUrl()">&#1057;&#1086;&#1093;&#1088;&#1072;&#1085;&#1080;&#1090;&#1100; URL</button>
+          <button class="btn btn-outline" onclick="checkForUpdates()">&#1055;&#1088;&#1086;&#1074;&#1077;&#1088;&#1080;&#1090;&#1100; &#1086;&#1073;&#1085;&#1086;&#1074;&#1083;&#1077;&#1085;&#1080;&#1077;</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="container">
     <header class="header" style="padding:12px 0 8px">
       <img class="logo-img" src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTczIiBoZWlnaHQ9IjE3MyIgdmlld0JveD0iMCAwIDE3MyAxNzMiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIxNzMiIGhlaWdodD0iMTczIiByeD0iMjUiIGZpbGw9InVybCgjcGFpbnQwX2xpbmVhcl82OV8yKSIvPgo8cGF0aCBkPSJNNzkuMTQxNiA1Ni40MTAyQzgzLjU3MTEgNTUuNzE0MyA4OC4xMDc3IDU2LjMxMDggOTIuMjA3IDU4LjEyNzlDOTguNzM4NyA2MS4wMjM0IDEwMy41ODIgNjYuNzU0OSAxMDUuMzQ5IDczLjY3NzdMMTEzLjE3NyAxMDQuMzU5TDExMy4yNTggMTA0LjcyOUMxMTQuMDQ4IDEwOC4zMjkgMTExLjYyNSAxMTEuODQ3IDEwNy45NzkgMTEyLjM5MUwxMDcuNjI0IDExMi40NDNDMTA1LjkzNCAxMTIuNjk1IDEwNC4yMjIgMTEyLjE2NSAxMDIuOTcgMTExLjAwM0wxMDIuNDg0IDExMC41NTJDMTAxLjc1NiAxMDkuODc2IDEwMC43OTkgMTA5LjUgOTkuODA1NyAxMDkuNUM5OC4yMDIxIDEwOS41IDk2Ljc1OSAxMTAuNDc0IDk2LjE1NzIgMTExLjk2TDk1LjMwODYgMTE0LjA1NkM5NC42MjA2IDExNS43NTUgOTMuMzE4MiAxMTcuMTMyIDkxLjY2MDIgMTE3LjkxNEw5MC43NTc4IDExOC4zMzlDODkuMTEyMSAxMTkuMTE1IDg3LjI4MzggMTE5LjQxOSA4NS40NzU2IDExOS4yMTlMODMuMTk2MyAxMTguOTY1QzgxLjQ5NDggMTE4Ljc3NiA3OS45NDcgMTE3Ljg5MSA3OC45MjE5IDExNi41Mkw3Ni41OTM4IDExMy40MDZDNzUuMDc1NyAxMTEuMzc2IDcxLjk4NSAxMTEuNTI5IDcwLjY3NDggMTEzLjY5OUw3MC4zMjMyIDExNC4xNzJDNjguNzMzOSAxMTYuMzA2IDY1Ljk3ODQgMTE3LjIxOCA2My40Mjk3IDExNi40NTNMNjMuMjEzOSAxMTYuMzg4QzYwLjc1NjUgMTE1LjY1MSA1OS4wMzgxIDExMy40MzUgNTguOTM1NSAxMTAuODcxTDU5Ljc2OTUgOTUuNjQ0NUM1OS44OTg2IDkzLjI4ODYgNTkuODUxNyA5MC45MjYyIDU5LjYyOTkgODguNTc3MUw1OC45MDE0IDgwLjg1OTRDNTguNjQwNiA3OC4wOTc5IDU4Ljg5NTQgNzUuMzEyMSA1OS42NTIzIDcyLjY0MzZDNjIuMDM2MiA2NC4yMzk5IDY5LjA4OTQgNTcuOTg5NCA3Ny43MTg4IDU2LjYzMzhMNzkuMTQxNiA1Ni40MTAyWk02OC45NjE5IDc1LjA1MjdDNjYuNDUzNyA3NS4wNTI3IDY0LjQxOTkgNzcuODkyNSA2NC40MTk5IDgxLjM5NDVDNjQuNDIwMSA4NC44OTY0IDY2LjQ1MzggODcuNzM1NCA2OC45NjE5IDg3LjczNTRDNzEuNDY5OSA4Ny43MzUxIDczLjUwMjggODQuODk2MiA3My41MDI5IDgxLjM5NDVDNzMuNTAyOSA3Ny44OTI3IDcxLjQ3IDc1LjA1MyA2OC45NjE5IDc1LjA1MjdaTTgyLjE1NzIgNzUuMDUyN0M3OS42NDkxIDc1LjA1MjcgNzcuNjE1NCA3Ny44OTE3IDc3LjYxNTIgODEuMzkzNkM3Ny42MTUyIDg0Ljg5NTYgNzkuNjQ5IDg3LjczNTQgODIuMTU3MiA4Ny43MzU0Qzg0LjY2NTQgODcuNzM1MiA4Ni42OTgyIDg0Ljg5NTUgODYuNjk4MiA4MS4zOTM2Qzg2LjY5ODEgNzcuODkxOCA4NC42NjUzIDc1LjA1MjkgODIuMTU3MiA3NS4wNTI3WiIgZmlsbD0id2hpdGUiLz4KPGRlZnM+CjxsaW5lYXJHcmFkaWVudCBpZD0icGFpbnQwX2xpbmVhcl82OV8yIiB4MT0iMTUxLjk3IiB5MT0iNS40OTc2MiIgeDI9IjIuMjg1NjgiIHkyPSIxOTMuODc1IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+CjxzdG9wIG9mZnNldD0iMC4zMDA5MzEiIHN0b3AtY29sb3I9IiMwMDY4RkYiLz4KPHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjODVEOUZFIi8+CjwvbGluZWFyR3JhZGllbnQ+CjwvZGVmcz4KPC9zdmc+Cg==" alt="RIFT">
@@ -2217,12 +2300,9 @@ cat <<'EOF' > /www/podkop_panel/index.html
       </div>
     </div>
     <div class="card">
-      <h3>VPN &#1076;&#1083;&#1103; &#1091;&#1089;&#1090;&#1088;&#1086;&#1081;&#1089;&#1090;&#1074;</h3>
-      <div class="input-group">
-        <input type="text" id="manual_ip" placeholder="IP (192.168.1.X)">
-        <button class="btn btn-primary" onclick="addManualIp()">+</button>
-      </div>
-      <div id="vpn_list" style="margin-top:10px"></div>
+      <h3>&#1055;&#1086;&#1083;&#1085;&#1099;&#1081; VPN &#1076;&#1083;&#1103; &#1091;&#1089;&#1090;&#1088;&#1086;&#1081;&#1089;&#1090;&#1074;</h3>
+      <div style="font-size:11px;color:var(--text-sec);margin-bottom:8px">&#1055;&#1088;&#1080;&#1074;&#1103;&#1079;&#1082;&#1072; &#1087;&#1086; MAC &#8212; IP &#1084;&#1086;&#1078;&#1077;&#1090; &#1084;&#1077;&#1085;&#1103;&#1090;&#1100;&#1089;&#1103;, &#1087;&#1088;&#1080;&#1074;&#1103;&#1079;&#1082;&#1072; &#1089;&#1086;&#1093;&#1088;&#1072;&#1085;&#1080;&#1090;&#1089;&#1103;.</div>
+      <div id="vpn_list" style="margin-top:4px"></div>
     </div>
     <div class="card">
       <h3>&#1044;&#1086;&#1084;&#1077;&#1085;&#1099; &#1095;&#1077;&#1088;&#1077;&#1079; VPN</h3>
@@ -2233,15 +2313,19 @@ cat <<'EOF' > /www/podkop_panel/index.html
       <div id="domains_list" style="margin-top:10px"></div>
     </div>
     <div class="card">
-      <h3>&#1047;&#1072;&#1097;&#1080;&#1090;&#1072; DNS</h3>
-      <div class="list-row" style="border-bottom:none;padding:0">
-        <div class="node-info">
-          <span class="item-name" id="dns_status_text">&#1055;&#1088;&#1086;&#1074;&#1077;&#1088;&#1082;&#1072;...</span>
-          <span class="item-sub" id="dns_status_meta">...</span>
-        </div>
-        <div class="node-actions">
-          <button class="btn btn-outline" id="dns_toggle_btn" onclick="toggleDnsProtection()">&#1042;&#1082;&#1083;&#1102;&#1095;&#1080;&#1090;&#1100;</button>
-        </div>
+      <h3>DNS</h3>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="dns-label">&#1058;&#1080;&#1087; &#1087;&#1088;&#1086;&#1090;&#1086;&#1082;&#1086;&#1083;&#1072; DNS</label>
+        <select id="dns_type" class="dns-select">
+          <option value="doh">DNS &#1095;&#1077;&#1088;&#1077;&#1079; HTTPS (DoH)</option>
+          <option value="dot">DNS &#1095;&#1077;&#1088;&#1077;&#1079; TLS (DoT)</option>
+          <option value="udp">UDP (&#1053;&#1077;&#1079;&#1072;&#1097;&#1080;&#1097;&#1105;&#1085;&#1085;&#1099;&#1081; DNS)</option>
+        </select>
+        <label class="dns-label" style="margin-top:8px">DNS-&#1089;&#1077;&#1088;&#1074;&#1077;&#1088;</label>
+        <select id="dns_server" class="dns-select"></select>
+        <label class="dns-label" style="margin-top:8px">Bootstrap DNS-&#1089;&#1077;&#1088;&#1074;&#1077;&#1088;</label>
+        <select id="dns_bootstrap" class="dns-select"></select>
+        <button class="btn btn-primary" style="margin-top:10px" onclick="saveDns()">&#1057;&#1086;&#1093;&#1088;&#1072;&#1085;&#1080;&#1090;&#1100; DNS</button>
       </div>
     </div>
     <div class="card">
@@ -2250,8 +2334,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     </div>
     <div class="card" style="text-align:center">
       <button class="btn btn-outline" onclick="openLogs()" style="margin:4px">&#1051;&#1086;&#1075;&#1080;</button>
-      <button class="btn btn-outline" onclick="upgradeSingbox()" style="margin:4px">&#1055;&#1088;&#1086;&#1074;&#1077;&#1088;&#1080;&#1090;&#1100; XHTTP Core</button>
-      <button class="btn btn-outline" onclick="checkForUpdates()" style="margin:4px">&#1054;&#1073;&#1085;&#1086;&#1074;&#1080;&#1090;&#1100; &#1087;&#1072;&#1085;&#1077;&#1083;&#1100;</button>
+      <button class="btn btn-outline" onclick="openSettings()" style="margin:4px">&#1057;&#1080;&#1089;&#1090;&#1077;&#1084;&#1085;&#1099;&#1077; &#1085;&#1072;&#1089;&#1090;&#1088;&#1086;&#1081;&#1082;&#1080;</button>
     </div>
   </div>
 <script>
@@ -2297,7 +2380,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     US:'<svg viewBox="0 0 18 12" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="18" height="12" fill="#B22234"/><rect y="1" width="18" height="1" fill="#FFFFFF"/><rect y="3" width="18" height="1" fill="#FFFFFF"/><rect y="5" width="18" height="1" fill="#FFFFFF"/><rect y="7" width="18" height="1" fill="#FFFFFF"/><rect y="9" width="18" height="1" fill="#FFFFFF"/><rect y="11" width="18" height="1" fill="#FFFFFF"/><rect width="8" height="6.5" fill="#3C3B6E"/></svg>',
     RU:'<svg viewBox="0 0 18 12" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="18" height="12" fill="#FFFFFF"/><rect y="4" width="18" height="4" fill="#0039A6"/><rect y="8" width="18" height="4" fill="#D52B1E"/></svg>'
   };
-  let globalNodes=[],activeKey="",vpnIps=[],domains=[],pingData={},dnsProtectionState=null;
+  let globalNodes=[],activeKey="",domains=[],pingData={},dnsProtectionState=null;
   const RU={
     request_failed:'\u041e\u0448\u0438\u0431\u043a\u0430',
     regular_singbox:'\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d \u043e\u0431\u044b\u0447\u043d\u044b\u0439 sing-box. \u041f\u0440\u0438 \u043f\u0435\u0440\u0432\u043e\u043c XHTTP-\u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0438 \u043f\u0430\u043d\u0435\u043b\u044c \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0442 sing-box-extended.',
@@ -2324,6 +2407,10 @@ cat <<'EOF' > /www/podkop_panel/index.html
     ping_updated:'\u041f\u0438\u043d\u0433 \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d',
     no_devices:'\u041d\u0435\u0442 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432',
     vpn_on:'VPN',
+    offline:'офлайн',
+    settings_saved:'Настройки сохранены',
+    settings_save_failed:'Ошибка сохранения настроек',
+    settings_failed:'Ошибка загрузки настроек',
     enable:'\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c',
     empty_list:'\u0421\u043f\u0438\u0441\u043e\u043a \u043f\u0443\u0441\u0442',
     remove:'\u0423\u0434\u0430\u043b\u0438\u0442\u044c',
@@ -2350,6 +2437,9 @@ cat <<'EOF' > /www/podkop_panel/index.html
     dns_toggle_failed:'\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c DNS',
     dns_enabled:'\u0417\u0430\u0449\u0438\u0442\u0430 DNS \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u0430',
     dns_disabled:'\u0417\u0430\u0449\u0438\u0442\u0430 DNS \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u0430',
+    dns_saved:'DNS \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d',
+    dns_save_failed:'\u041e\u0448\u0438\u0431\u043a\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f DNS',
+    dns_server_empty:'\u0423\u043a\u0430\u0436\u0438\u0442\u0435 DNS-\u0441\u0435\u0440\u0432\u0435\u0440',
     check_singbox:'\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c sing-box \u0438 \u043f\u0440\u0438 \u043d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c\u043e\u0441\u0442\u0438 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c sing-box extended \u0434\u043b\u044f XHTTP? \u042d\u0442\u043e \u043c\u043e\u0436\u0435\u0442 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c podkop.',
     check_completed:'\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430',
     before:'\u0414\u043e',
@@ -2414,38 +2504,34 @@ cat <<'EOF' > /www/podkop_panel/index.html
     const code=getFlagCode(node&&node.name||'');
     return {title,code,flagHtml:renderFlag(code)};
   }
-  function renderDnsProtection(state){
-    dnsProtectionState=state||null;
-    const statusEl=document.getElementById('dns_status_text');
-    const metaEl=document.getElementById('dns_status_meta');
-    const btn=document.getElementById('dns_toggle_btn');
-    if(!statusEl||!metaEl||!btn)return;
-    if(!state){
-      statusEl.textContent=RU.dns_unavailable;
-      metaEl.textContent=RU.dns_read_failed;
-      btn.textContent=RU.retry;
-      btn.className='btn btn-outline';
-      return;
+  // Заполняет <select> опциями из списка [{v,l}], выбирает current.
+  // Если current нет в списке (кастомное значение уже стоит в podkop) — добавляем его.
+  function fillSelect(el,list,current){
+    if(!el)return;
+    el.innerHTML='';
+    let found=false;
+    (list||[]).forEach(o=>{
+      const opt=document.createElement('option');
+      opt.value=o.v; opt.textContent=o.l||o.v;
+      if(o.v===current)found=true;
+      el.appendChild(opt);
+    });
+    if(current&&!found){
+      const opt=document.createElement('option');
+      opt.value=current; opt.textContent=current+' (текущий)';
+      el.appendChild(opt);
     }
-    const type=String(state.dns_type||'').toUpperCase();
-    const dns=state.dns_server||'-';
-    const bootstrap=state.bootstrap_dns_server||'-';
-    if(state.active){
-      statusEl.textContent=RU.dns_protected;
-      metaEl.textContent=`${type} / ${dns} / ${RU.bootstrap_label} ${bootstrap}`;
-      btn.textContent=RU.disable;
-      btn.className='btn btn-danger';
-    }else if(state.secure){
-      statusEl.textContent=RU.dns_custom_secure;
-      metaEl.textContent=`${type} / ${dns} / ${RU.bootstrap_label} ${bootstrap}`;
-      btn.textContent=RU.activate;
-      btn.className='btn btn-outline';
-    }else{
-      statusEl.textContent=RU.dns_unprotected;
-      metaEl.textContent=`${type} / ${dns} / ${RU.bootstrap_label} ${bootstrap}`;
-      btn.textContent=RU.activate;
-      btn.className='btn btn-primary';
+    if(current)el.value=current;
+  }
+  function renderDnsSettings(s){
+    dnsProtectionState=s||null;
+    const typeEl=document.getElementById('dns_type');
+    if(typeEl){
+      const t=String((s&&s.dns_type)||'').toLowerCase();
+      if(t==='udp'||t==='dot'||t==='doh')typeEl.value=t;
     }
+    fillSelect(document.getElementById('dns_server'), s&&s.servers, s&&s.dns_server);
+    fillSelect(document.getElementById('dns_bootstrap'), s&&s.bootstraps, s&&s.bootstrap_dns_server);
   }
   async function api(method,params={}){
     params.method=method;
@@ -2467,8 +2553,7 @@ cat <<'EOF' > /www/podkop_panel/index.html
     }catch(e){}
     try{const r=await api('get_sub_url');if(r.url)document.getElementById('sub_url').value=r.url;}catch(e){}
     try{const r=await api('get_hwid_info');document.getElementById('hwid_info').innerHTML='<b>HWID:</b> '+(r.hwid||'?')+'<br><b>OS:</b> '+(r.os_type||'')+' '+(r.os_version||'')+'<br><b>'+RU.model+':</b> '+(r.device_model||'?');}catch(e){}
-    try{const r=await api('get_singbox_status');if(!r.xhttp_supported)showToast(RU.regular_singbox,10000);}catch(e){}
-    await loadData();await loadNetwork();await loadDnsProtection();
+    await loadData();await loadNetwork();await loadDnsSettings();
   };
   function relativeTime(input){
     if(!input)return '';
@@ -2566,54 +2651,62 @@ cat <<'EOF' > /www/podkop_panel/index.html
   }
   async function loadNetwork(){
     try{
-      const d=await api('get_network');const c=d.clients||[];vpnIps=Array.isArray(d.vpn_ips)?d.vpn_ips:[];domains=Array.isArray(d.domains)?d.domains:[];
-      let vh="";c.forEach(x=>{const iv=vpnIps.includes(x.ip);vh+=`<div class="list-row"><div class="node-info"><span class="item-name">${esc(x.name)}</span><span class="item-sub">${esc(x.ip)}</span></div><div class="node-actions">${iv?`<button class="btn btn-active" onclick="toggleVpn('${x.ip}','del')">${RU.vpn_on}</button>`:`<button class="btn btn-outline" onclick="toggleVpn('${x.ip}','add')">${RU.enable}</button>`}</div></div>`;});
+      const d=await api('get_network');
+      const c=d.clients||[];
+      const off=Array.isArray(d.vpn_offline)?d.vpn_offline:[];
+      domains=Array.isArray(d.domains)?d.domains:[];
+      let vh="";
+      // онлайн-устройства (LAN), кнопка вкл/выкл по MAC
+      c.forEach(x=>{
+        const nm=encodeURIComponent(x.name||x.mac);
+        const btn=x.enabled
+          ?`<button class="btn btn-active" onclick="toggleVpn('${x.mac}','del','${nm}')">${RU.vpn_on}</button>`
+          :`<button class="btn btn-outline" onclick="toggleVpn('${x.mac}','add','${nm}')">${RU.enable}</button>`;
+        vh+=`<div class="list-row"><div class="node-info"><span class="item-name">${esc(x.name)}</span><span class="item-sub">${esc(x.ip)} · ${esc(x.mac)}</span></div><div class="node-actions">${btn}</div></div>`;
+      });
+      // включённые, но сейчас офлайн (привязка по MAC сохранена)
+      off.forEach(x=>{
+        const nm=encodeURIComponent(x.name||x.mac);
+        vh+=`<div class="list-row" style="opacity:.55"><div class="node-info"><span class="item-name">${esc(x.name)}</span><span class="item-sub">${esc(x.mac)} · ${RU.offline}</span></div><div class="node-actions"><button class="btn btn-active" onclick="toggleVpn('${x.mac}','del','${nm}')">${RU.vpn_on}</button></div></div>`;
+      });
       document.getElementById("vpn_list").innerHTML=vh||'<div class="empty-state">'+RU.no_devices+'</div>';
       let dh="";domains.forEach(dom=>{dh+=`<div class="list-row"><div class="node-info"><span class="item-name">${esc(dom)}</span></div><div class="node-actions"><button class="btn btn-danger" onclick="manageDomain('${dom}','del')">${RU.remove}</button></div></div>`;});
       document.getElementById('domains_list').innerHTML=dh||'<div class="empty-state">'+RU.empty_list+'</div>';
     }catch(e){showToast(RU.network_failed+': '+e.message);}
   }
-  async function loadDnsProtection(){
+  async function loadDnsSettings(){
     try{
-      const r=await api('get_dns_protection');
-      renderDnsProtection(r);
+      const r=await api('get_dns_settings');
+      renderDnsSettings(r);
     }catch(e){
-      renderDnsProtection(null);
+      renderDnsSettings(null);
       showToast('DNS: '+e.message,8000);
     }
   }
-  async function toggleDnsProtection(){
-    const enable=!(dnsProtectionState&&dnsProtectionState.active);
+  async function saveDns(){
+    const dns_type=document.getElementById('dns_type').value;
+    const dns_server=document.getElementById('dns_server').value.trim();
+    const bootstrap=document.getElementById('dns_bootstrap').value.trim();
+    if(!dns_server){showToast(RU.dns_server_empty,8000);return;}
     showLoader();
     try{
-      const r=await api('toggle_dns_protection',{enable:enable?'1':'0'});
-      renderDnsProtection(r);
-      showToast(enable?RU.dns_enabled:RU.dns_disabled,8000);
+      await api('set_dns_settings',{dns_type,dns_server,bootstrap});
+      await loadDnsSettings();   // перечитываем со списками (ответ set не содержит опций)
+      showToast(RU.dns_saved,8000);
     }catch(e){
-      showToast(RU.dns_toggle_failed+': '+e.message,10000);
+      showToast(RU.dns_save_failed+': '+e.message,10000);
     }finally{hideLoader();}
   }
-  async function toggleVpn(ip,a){showLoader();try{await api('manage_vpn',{ip,action:a});await new Promise(r=>setTimeout(r,2000));await loadNetwork();}catch(e){showToast('VPN: '+e.message);}finally{hideLoader();}}
-  function addManualIp(){const ip=document.getElementById('manual_ip').value;if(ip)toggleVpn(ip,'add');document.getElementById('manual_ip').value="";}
+  async function toggleVpn(mac,a,name){showLoader();try{await api('manage_vpn',{mac,action:a,name:decodeURIComponent(name||'')});await new Promise(r=>setTimeout(r,1500));await loadNetwork();}catch(e){showToast('VPN: '+e.message);}finally{hideLoader();}}
   async function manageDomain(d,a){showLoader();try{await api('manage_domain',{domain:d,action:a});await new Promise(r=>setTimeout(r,2000));await loadNetwork();}catch(e){showToast(RU.domain_failed+': '+e.message);}finally{hideLoader();}}
   function addDomain(){const d=document.getElementById('new_domain').value;if(d)manageDomain(d,'add');document.getElementById('new_domain').value="";}
   function openLogs(){document.getElementById('logsModal').style.display='block';loadLogs();}
   function closeLogs(){document.getElementById('logsModal').style.display='none';}
+  function openSettings(){document.getElementById('settingsModal').style.display='block';loadSettings();}
+  function closeSettings(){document.getElementById('settingsModal').style.display='none';}
+  async function loadSettings(){try{const r=await api('get_update_url');document.getElementById('update_url').value=r.url||'';document.getElementById('update_url_default').textContent=r.default||'';document.getElementById('set_version').textContent=r.panel_version||'—';}catch(e){showToast(RU.settings_failed+': '+e.message,8000);}}
+  async function saveUpdateUrl(){const u=document.getElementById('update_url').value.trim();showLoader();try{const r=await api('set_update_url',{url:u});document.getElementById('update_url').value=r.url||u;showToast(RU.settings_saved,6000);}catch(e){showToast(RU.settings_save_failed+': '+e.message,10000);}finally{hideLoader();}}
   async function loadLogs(lines){try{const r=await api('get_logs',{lines:lines||50});const el=document.getElementById('logs_text');el.textContent=r.logs||RU.no_logs;el.scrollTop=el.scrollHeight;}catch(e){document.getElementById('logs_text').textContent=RU.error+': '+e.message;}}
-  async function upgradeSingbox(){
-    if(!confirm(RU.check_singbox))return;
-    showLoader();
-    try{
-      const r=await api('upgrade_singbox');
-      const msg=`${r.msg||RU.check_completed}${r.before?`\\n${RU.before}: ${r.before}`:''}${r.after?`\\n${RU.after}: ${r.after}`:''}`;
-      showToast(msg,12000);
-      if(r.logs){console.log(r.logs);}
-      await new Promise(r=>setTimeout(r,3000));
-      await loadData();
-    }catch(e){
-      showToast('XHTTP Core: '+e.message,12000);
-    }finally{hideLoader();}
-  }
   async function checkForUpdates(){showLoader();try{const r=await api('check_for_update');if(r.status==='update_available'){if(confirm(`${RU.update_available}${r.remote_v} (${RU.current_version} ${r.local_v}).`)){await api('perform_update');await new Promise(r=>setTimeout(r,4000));location.reload();}}else showToast(`${RU.latest_version} (${r.local_v}).`);}catch(e){showToast(RU.updates_failed+': '+e.message);}finally{hideLoader();}}
 </script>
 </body>
@@ -2830,26 +2923,115 @@ rm -f "$TMP"
 AEOF
 chmod +x /etc/podkop_data/autoupdate_sub.sh
 
-# MAC-VPN watcher отключён: «полный VPN» вернулся на IP-режим (как в старой
-# версии). Если предыдущая установка успела поставить watcher — убираем его,
-# иначе он каждые 30с затирал бы podkop.main.fully_routed_ips.
-logi "[9.5/10] MAC-VPN watcher отключён (IP-режим), очистка старого watcher..."
-if [ -x /etc/init.d/rift-mac-vpn-watcher ]; then
-  /etc/init.d/rift-mac-vpn-watcher stop >/dev/null 2>&1
-  /etc/init.d/rift-mac-vpn-watcher disable >/dev/null 2>&1
+# 8.5) MAC-VPN watcher (v4.8): синхронит podkop.main.fully_routed_ips с vpn_macs.list.
+logi "[9.5/10] Установка MAC-VPN watcher..."
+mkdir -p /usr/local/sbin   # на минимальных OpenWrt этой папки может не быть
+touch /etc/podkop_data/vpn_macs.list
+
+cat <<'WEOF' > /usr/local/sbin/rift-mac-vpn-watcher
+#!/bin/sh
+# rift-mac-vpn-watcher: каждые 30 сек переотражает MAC->IP в podkop.main.fully_routed_ips.
+# Storage: /etc/podkop_data/vpn_macs.list (формат: "MAC<TAB>HOSTNAME" по строке).
+# Mode: --once (одно прохождение) или без аргумента (бесконечный цикл через 30s).
+VPN_MACS_FILE="/etc/podkop_data/vpn_macs.list"
+MODE="$1"
+
+resolve_one_pass() {
+  [ -s "$VPN_MACS_FILE" ] || {
+    cur="$(uci -q get podkop.main.fully_routed_ips)"
+    [ -n "$cur" ] && {
+      uci -q delete podkop.main.fully_routed_ips
+      uci commit podkop
+      /etc/init.d/podkop reload >/dev/null 2>&1
+      logger -t rift-mac-vpn "Cleared fully_routed_ips (list empty)"
+    }
+    return 0
+  }
+  NEW_IPS=""
+  while IFS=$(printf '\t') read -r MAC NAME; do
+    [ -z "$MAC" ] && continue
+    IP="$(ip -4 neigh show 2>/dev/null | awk -v m="$(echo "$MAC" | tr A-Z a-z)" 'tolower($5)==m && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1; exit}')"
+    if [ -z "$IP" ]; then
+      IP="$(awk -v m="$(echo "$MAC" | tr A-Z a-z)" 'tolower($2)==m {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
+    fi
+    [ -n "$IP" ] && NEW_IPS="$NEW_IPS $IP"
+  done < "$VPN_MACS_FILE"
+  NEW_SORTED="$(echo "$NEW_IPS" | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+  CUR_SORTED="$(uci -q get podkop.main.fully_routed_ips | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$NEW_SORTED" != "$CUR_SORTED" ]; then
+    uci -q delete podkop.main.fully_routed_ips
+    for ip in $NEW_SORTED; do
+      uci add_list podkop.main.fully_routed_ips="$ip"
+    done
+    uci commit podkop
+    /etc/init.d/podkop reload >/dev/null 2>&1
+    logger -t rift-mac-vpn "fully_routed_ips updated: [$NEW_SORTED]"
+  fi
+}
+
+if [ "$MODE" = "--once" ]; then
+  resolve_one_pass
+  exit 0
 fi
-rm -f /etc/init.d/rift-mac-vpn-watcher /usr/local/sbin/rift-mac-vpn-watcher
-rm -f /etc/podkop_data/vpn_macs.list
+while :; do
+  resolve_one_pass
+  sleep 30
+done
+WEOF
+chmod +x /usr/local/sbin/rift-mac-vpn-watcher
+
+cat <<'IEOF' > /etc/init.d/rift-mac-vpn-watcher
+#!/bin/sh /etc/rc.common
+# RIFT MAC-VPN watcher: keeps podkop.main.fully_routed_ips in sync with vpn_macs.list
+USE_PROCD=1
+START=99
+STOP=10
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/local/sbin/rift-mac-vpn-watcher
+    procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-0}
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+reload_service() {
+    stop
+    start
+}
+IEOF
+chmod +x /etc/init.d/rift-mac-vpn-watcher
+/etc/init.d/rift-mac-vpn-watcher enable >/dev/null 2>&1
+/etc/init.d/rift-mac-vpn-watcher start >/dev/null 2>&1
+
+# Миграция: если vpn_macs.list пуст, но в podkop есть старые fully_routed_ips —
+# восстанавливаем MAC по текущему ip neigh / dhcp.leases (разово при апгрейде).
+if [ ! -s /etc/podkop_data/vpn_macs.list ]; then
+  OLD_IPS="$(uci -q get podkop.main.fully_routed_ips)"
+  if [ -n "$OLD_IPS" ]; then
+    logi "  -> миграция fully_routed_ips IP->MAC..."
+    for ip in $OLD_IPS; do
+      MAC="$(ip -4 neigh show "$ip" 2>/dev/null | awk '/lladdr/ {print $5; exit}')"
+      [ -z "$MAC" ] && MAC="$(awk -v ip="$ip" '$3==ip {print $2; exit}' /tmp/dhcp.leases 2>/dev/null)"
+      NAME="$(awk -v ip="$ip" '$3==ip {print $4; exit}' /tmp/dhcp.leases 2>/dev/null)"
+      [ -z "$NAME" ] && NAME="$ip"
+      [ -n "$MAC" ] && printf '%s\t%s\n' "$MAC" "$NAME" >> /etc/podkop_data/vpn_macs.list
+    done
+  fi
+fi
+/usr/local/sbin/rift-mac-vpn-watcher --once >/dev/null 2>&1
 # ----------------------------------------------------------------------------
 
 # Panel auto-update (daily)
 cat <<'PEOF' > /etc/podkop_data/autoupdate_panel.sh
 #!/bin/sh
+# URL источника обновлений берём из uci (правится в «Системных настройках»).
+URL="$(uci -q get podkop_subs.config.update_url)"
+[ -z "$URL" ] && URL="https://router.rift.monster/rift.sh"
 TMP="/tmp/rift_remote.sh"
 if command -v uclient-fetch >/dev/null 2>&1; then
-  uclient-fetch -q -O "$TMP" "https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh" 2>/dev/null || { rm -f "$TMP"; exit 0; }
+  uclient-fetch -q -O "$TMP" "$URL" 2>/dev/null || { rm -f "$TMP"; exit 0; }
 else
-  wget -q -O "$TMP" "https://raw.githubusercontent.com/RIFT-VPN/Router/refs/heads/main/rift.sh" 2>/dev/null || { rm -f "$TMP"; exit 0; }
+  wget -q -O "$TMP" "$URL" 2>/dev/null || { rm -f "$TMP"; exit 0; }
 fi
 grep -q '^PANEL_VERSION="' "$TMP" 2>/dev/null || { rm -f "$TMP"; exit 0; }
 sed -i 's/\r$//' "$TMP"
@@ -2863,11 +3045,19 @@ chmod +x /etc/podkop_data/autoupdate_panel.sh
 # 9) cron
 logi "[10/10] Настройка cron..."
 (crontab -l 2>/dev/null | grep -Fv "autoupdate_sub" | grep -Fv "autoupdate_panel" | grep -Fv "/etc/podkop_data/") | crontab -
-(crontab -l 2>/dev/null; echo "*/5 * * * * /etc/podkop_data/autoupdate_sub.sh"; echo "13 4 * * * /etc/podkop_data/autoupdate_panel.sh") | crontab -
+# Подписка обновляется раз в час (в :07) — меньше сети и /tmp-churn на роутере.
+# Список узлов и так переписывается только при реальном изменении подписки.
+(crontab -l 2>/dev/null; echo "7 * * * * /etc/podkop_data/autoupdate_sub.sh"; echo "13 4 * * * /etc/podkop_data/autoupdate_panel.sh") | crontab -
 
 # finish
 chmod +x /www/podkop_panel/cgi-bin/rpc
 sed -i 's/\r$//' /www/podkop_panel/cgi-bin/rpc
+# Подставляем версию парсера — при апгрейде первый update_subs пересоберёт nodes.lua
+# (parser_ver в сохранённом списке не совпадёт → перезапись, даже если хэш подписки
+# прежний). Так изменения конвертера (напр. скрытие XHTTP) применяются к старому списку.
+# nodes.lua НЕ удаляем: если фоновый refresh ниже не сработает, лучше показать старый
+# список, чем пустой (cron теперь раз в час). Пересборка произойдёт при первом же update_subs.
+sed -i "s/__RIFT_PARSER_VER__/${PANEL_VERSION}/" /www/podkop_panel/cgi-bin/rpc
 /etc/init.d/uhttpd enable >/dev/null 2>&1
 # Рестарты сети откладываем в фон на 3с: при `sh <(wget ...)` рестарт dnsmasq
 # здесь рвёт ещё не докачанный хвост pipe → "stalled / timed out". Фон даёт
@@ -2875,6 +3065,10 @@ sed -i 's/\r$//' /www/podkop_panel/cgi-bin/rpc
 ( sleep 3
   /etc/init.d/uhttpd restart >/dev/null 2>&1
   /etc/init.d/dnsmasq reload  >/dev/null 2>&1
+  # После рестарта uhttpd пересобираем список узлов новым конвертером
+  # (nodes.lua мы удалили выше) — чтобы XHTTP-узлы сразу исчезли, не ждать cron.
+  sleep 3
+  /etc/podkop_data/autoupdate_sub.sh >/dev/null 2>&1
 ) >/dev/null 2>&1 &
 
 logi "================================================="
@@ -2883,7 +3077,7 @@ logi "Доступ: http://${ROUTER_IP}:2017"
 logi "Домен: http://rift.lan/"
 logi "HWID: $(cat /etc/podkop_data/hwid 2>/dev/null)"
 logi "sing-box(after): $(/usr/bin/sing-box version 2>/dev/null | head -1)"
-logi "Авто-обновление подписки: каждые 5 минут"
+logi "Авто-обновление подписки: раз в час"
 logi "Лог установки: ${INSTALL_LOG}"
 logi "Лог работы панели: /tmp/rift_panel.log (или кнопка «Логи» в панели)"
 logi "================================================="
