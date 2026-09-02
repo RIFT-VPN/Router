@@ -43,7 +43,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION="0.4.1-443"
+VERSION="0.4.2-443"
 PORT="${PORT:-443}"
 HY2_PORT="$PORT"
 REALITY_SNI="${REALITY_SNI:-www.microsoft.com}"
@@ -376,7 +376,9 @@ JSON
 }
 
 start_xray_stage() {
-  local network="$1" label="$2" cfg="$TMP/xray-server-${network}.json"
+  local network="$1"
+  local label="$2"
+  local cfg="$TMP/xray-server-${network}.json"
   stop_xray
   if port_busy_tcp "$PORT"; then
     ss -lntp 2>/dev/null | grep -E ":${PORT}([^0-9]|$)" >&2 || true
