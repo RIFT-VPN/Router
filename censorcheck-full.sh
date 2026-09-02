@@ -25,7 +25,7 @@
 #
 # Environment:
 #   RIPE_API_KEY=...          RIPE Atlas API key; Atlas stage skipped if absent
-#   REALITY_SNI=www.microsoft.com
+#   REALITY_SNI=www.cloudflare.com
 #   PUBLIC_IP=1.2.3.4         optional override
 #   PORT=443                  test port; default and recommended 443
 #   RUN_ORIGINAL=1            run upstream censorcheck while RAW+HY2 are active
@@ -43,12 +43,13 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION="0.4.2-443"
+VERSION="0.5.1-443"
 PORT="${PORT:-443}"
 HY2_PORT="$PORT"
-REALITY_SNI="${REALITY_SNI:-www.microsoft.com}"
+REALITY_SNI="${REALITY_SNI:-www.cloudflare.com}"
 PUBLIC_IP="${PUBLIC_IP:-}"
 RIPE_API_KEY="${RIPE_API_KEY:-}"
+RIPE_PROMPT="${RIPE_PROMPT:-1}"
 RUN_ORIGINAL="${RUN_ORIGINAL:-1}"
 SELFTEST="${SELFTEST:-1}"
 HOLD_SECONDS="${HOLD_SECONDS:-0}"
@@ -85,6 +86,7 @@ Usage:
 
 Options:
   --ripe-key KEY       RIPE Atlas API key
+  --no-ripe            skip RIPE Atlas prompt/radar
   --ip IPv4            override public IPv4 autodetection
   --sni HOST           REALITY target/SNI (default: ${REALITY_SNI})
   --hold SECONDS       keep EACH RAW/XHTTP/gRPC stage on TCP/${PORT} for N seconds
@@ -100,7 +102,8 @@ USAGE
 
 while (($#)); do
   case "$1" in
-    --ripe-key) [[ $# -ge 2 ]] || die "--ripe-key requires value"; RIPE_API_KEY="$2"; shift 2 ;;
+    --ripe-key) [[ $# -ge 2 ]] || die "--ripe-key requires value"; RIPE_API_KEY="$2"; RIPE_PROMPT=0; shift 2 ;;
+    --no-ripe) RIPE_API_KEY=""; RIPE_PROMPT=0; shift ;;
     --ip) [[ $# -ge 2 ]] || die "--ip requires value"; PUBLIC_IP="$2"; shift 2 ;;
     --sni) [[ $# -ge 2 ]] || die "--sni requires value"; REALITY_SNI="$2"; shift 2 ;;
     --hold) [[ $# -ge 2 ]] || die "--hold requires seconds"; HOLD_SECONDS="$2"; shift 2 ;;
@@ -133,6 +136,7 @@ valid_port "$PORT" || die "Invalid PORT=$PORT"
 is_uint "$HOLD_SECONDS" || die "HOLD_SECONDS must be integer"
 is_uint "$ATLAS_PROBES_PER_ASN" || die "ATLAS_PROBES_PER_ASN must be integer"
 is_uint "$ATLAS_TIMEOUT" || die "ATLAS_TIMEOUT must be integer"
+[[ "$RIPE_PROMPT" == 0 || "$RIPE_PROMPT" == 1 ]] || die "RIPE_PROMPT must be 0 or 1"
 ((ATLAS_PROBES_PER_ASN >= 1 && ATLAS_PROBES_PER_ASN <= 10)) || die "ATLAS_PROBES_PER_ASN must be 1..10"
 ((ATLAS_TIMEOUT >= 30 && ATLAS_TIMEOUT <= 600)) || die "ATLAS_TIMEOUT must be 30..600"
 valid_hostname "$REALITY_SNI" || die "Invalid REALITY_SNI=$REALITY_SNI"
@@ -161,20 +165,176 @@ install_deps() {
   fi
 }
 
+prompt_ripe_key() {
+  [[ -n "$RIPE_API_KEY" || "$RIPE_PROMPT" != 1 ]] && return 0
+  [[ -r /dev/tty && -w /dev/tty ]] || {
+    warn "No interactive TTY; RIPE Atlas key prompt skipped. Use RIPE_API_KEY=... or --ripe-key."
+    return 0
+  }
+  printf '\n%bRIPE Atlas radar%b\n' "$C_BOLD" "$C_RESET" > /dev/tty
+  printf 'API key (hidden; Enter = skip RIPE Atlas): ' > /dev/tty
+  IFS= read -r -s RIPE_API_KEY < /dev/tty || RIPE_API_KEY=""
+  printf '\n' > /dev/tty
+  RIPE_API_KEY="${RIPE_API_KEY//$'\r'/}"
+}
+
+validate_ripe_key() {
+  [[ -n "$RIPE_API_KEY" ]] || return 2
+  section "Checking RIPE Atlas API key"
+  local out rc
+  set +e
+  out="$(RIPE_API_KEY="$RIPE_API_KEY" python3 - <<'PYKEY'
+import json, os, re, sys, urllib.request, urllib.error
+
+KEY = os.environ.get("RIPE_API_KEY", "").strip()
+BASE = "https://atlas.ripe.net/api/v2"
+
+if not KEY or re.search(r"\\s", KEY):
+    print("RIPE_KEY_ERROR=bad_format")
+    sys.exit(10)
+
+def request(path, method="GET", payload=None):
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Key {KEY}",
+        "User-Agent": "censorcheck-full/0.5.1",
+    }
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode()
+    req = urllib.request.Request(BASE + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
+    except Exception as e:
+        print(f"RIPE_KEY_ERROR=network:{type(e).__name__}:{e}")
+        sys.exit(11)
+
+# A key with create-measurement permission also has sufficient measurement-view
+# access for this endpoint. This is a non-destructive authentication check.
+status_get, body_get = request("/measurements/my/?page_size=1")
+if status_get != 200:
+    print(f"RIPE_KEY_ERROR=auth_http_{status_get}")
+    if body_get:
+        print("RIPE_KEY_DETAIL=" + body_get[:300].replace("\\n", " "))
+    sys.exit(12)
+
+# Permission probe: an intentionally incomplete measurement body must be rejected
+# as bad input (400) only after authorization succeeds. 403 means the key cannot
+# create measurements (or is invalid/disabled/outside its validity window).
+status_post, body_post = request("/measurements/", "POST", {})
+if status_post == 400:
+    print("RIPE_KEY_OK=1")
+    print("RIPE_KEY_AUTH=valid")
+    print("RIPE_KEY_CREATE_MEASUREMENT=yes")
+    sys.exit(0)
+if status_post == 403:
+    print("RIPE_KEY_ERROR=no_create_measurement_permission_or_key_inactive")
+    if body_post:
+        print("RIPE_KEY_DETAIL=" + body_post[:300].replace("\\n", " "))
+    sys.exit(13)
+
+print(f"RIPE_KEY_ERROR=unexpected_http_{status_post}")
+if body_post:
+    print("RIPE_KEY_DETAIL=" + body_post[:300].replace("\\n", " "))
+sys.exit(14)
+PYKEY
+)"
+  rc=$?
+  set -e
+  printf '%s\n' "$out" | sed -E \
+    -e 's/^RIPE_KEY_OK=/  OK: /' \
+    -e 's/^RIPE_KEY_AUTH=/  AUTH: /' \
+    -e 's/^RIPE_KEY_CREATE_MEASUREMENT=/  CREATE MEASUREMENT: /' \
+    -e 's/^RIPE_KEY_ERROR=/  ERROR: /' \
+    -e 's/^RIPE_KEY_DETAIL=/  DETAIL: /'
+  if ((rc == 0)) && grep -q '^RIPE_KEY_OK=1$' <<<"$out"; then
+    ok "RIPE Atlas key is valid and can create measurements"
+    return 0
+  fi
+  warn "RIPE Atlas key check failed. The key is not usable for this radar."
+  return 1
+}
+
+setup_ripe_key() {
+  prompt_ripe_key
+  [[ -n "$RIPE_API_KEY" ]] || { warn "RIPE Atlas skipped by user"; return 0; }
+  if validate_ripe_key; then return 0; fi
+  if [[ "$RIPE_PROMPT" == 1 && -r /dev/tty && -w /dev/tty ]]; then
+    while true; do
+      printf 'Enter another RIPE Atlas API key (hidden; Enter = skip): ' > /dev/tty
+      IFS= read -r -s RIPE_API_KEY < /dev/tty || RIPE_API_KEY=""
+      printf '\n' > /dev/tty
+      [[ -n "$RIPE_API_KEY" ]] || { warn "RIPE Atlas skipped by user"; return 0; }
+      validate_ripe_key && return 0
+    done
+  fi
+  die "Invalid RIPE Atlas API key. Fix its grants or run with --no-ripe."
+}
+
 port_busy_tcp() { ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${1}$"; }
 port_busy_udp() {
   ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)${1}$" || \
   ss -H -lun 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${1}$"
 }
 
+proc_cmdline() {
+  local pid="$1"
+  [[ -r "/proc/${pid}/cmdline" ]] || return 1
+  tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true
+}
+
+kill_pid_gracefully() {
+  local pid="${1:-}"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill "$pid" 2>/dev/null || true
+  for _ in {1..20}; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+kill_processes_matching_tmp() {
+  local needle="${1:-}"
+  [[ -n "$needle" ]] || return 0
+  local pid cmd
+  for pid in /proc/[0-9]*; do
+    pid="${pid##*/}"
+    [[ "$pid" != "$$" ]] || continue
+    cmd="$(proc_cmdline "$pid" || true)"
+    [[ -n "$cmd" ]] || continue
+    if [[ "$cmd" == *"$needle"* && ( "$cmd" == *"xray"* || "$cmd" == *"hysteria"* ) ]]; then
+      kill_pid_gracefully "$pid"
+    fi
+  done
+}
+
+cleanup_stale_censorcheck_processes() {
+  local pid cmd found=0
+  for pid in /proc/[0-9]*; do
+    pid="${pid##*/}"
+    [[ "$pid" != "$$" ]] || continue
+    cmd="$(proc_cmdline "$pid" || true)"
+    [[ -n "$cmd" ]] || continue
+    if [[ "$cmd" == *"/tmp/censorcheck-full."* && ( "$cmd" == *"xray"* || "$cmd" == *"hysteria"* ) ]]; then
+      ((found++)) || true
+      warn "Removing stale censorcheck-full process PID=${pid}: ${cmd:0:160}"
+      kill_pid_gracefully "$pid"
+    fi
+  done
+  ((found == 0)) || ok "Removed ${found} stale censorcheck-full process(es)"
+}
+
 stop_xray() {
   set +e
-  if [[ -n "${XRAY_SERVER_PID:-}" ]]; then
-    kill "$XRAY_SERVER_PID" 2>/dev/null
-    for _ in {1..20}; do kill -0 "$XRAY_SERVER_PID" 2>/dev/null || break; sleep 0.1; done
-    kill -9 "$XRAY_SERVER_PID" 2>/dev/null
-    wait "$XRAY_SERVER_PID" 2>/dev/null
-  fi
+  kill_pid_gracefully "${XRAY_SERVER_PID:-}"
+  [[ -n "${TMP:-}" ]] && kill_processes_matching_tmp "$TMP/xray-server-"
   XRAY_SERVER_PID=""
   set -e
 }
@@ -184,15 +344,26 @@ cleanup() {
   CLEANED=1
   set +e
   stop_xray
-  for pid in "${CHILD_PIDS[@]:-}"; do [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; done
-  [[ -n "${HY2_SERVER_PID:-}" ]] && kill "$HY2_SERVER_PID" 2>/dev/null
-  sleep 0.2
-  for pid in "${CHILD_PIDS[@]:-}"; do [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null; done
-  [[ -n "${HY2_SERVER_PID:-}" ]] && kill -9 "$HY2_SERVER_PID" 2>/dev/null
+  for pid in "${CHILD_PIDS[@]:-}"; do kill_pid_gracefully "$pid"; done
+  kill_pid_gracefully "${HY2_SERVER_PID:-}"
+  [[ -n "${TMP:-}" ]] && kill_processes_matching_tmp "$TMP"
   [[ -n "$TMP" && -d "$TMP" ]] && rm -rf -- "$TMP"
   set -e
 }
-trap cleanup EXIT INT TERM HUP
+on_signal() {
+  local sig="$1"
+  cleanup
+  case "$sig" in
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+    HUP) exit 129 ;;
+    *) exit 1 ;;
+  esac
+}
+trap cleanup EXIT
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+trap 'on_signal HUP' HUP
 
 install_deps
 TMP="$(mktemp -d /tmp/censorcheck-full.XXXXXX)"
@@ -203,6 +374,9 @@ printf 'Temporary directory: %s\n' "$TMP"
 printf 'REALITY target/SNI: %s\n' "$REALITY_SNI"
 printf 'TCP/%s: RAW -> XHTTP -> gRPC sequentially\n' "$PORT"
 printf 'UDP/%s: Hysteria2/QUIC\n' "$PORT"
+
+cleanup_stale_censorcheck_processes
+setup_ripe_key
 
 if [[ -z "$PUBLIC_IP" ]]; then
   log "Detecting public IPv4..."
@@ -509,7 +683,7 @@ KEY=os.environ["RIPE_API_KEY"]; IP=os.environ["PUBLIC_IP"]; PORT=int(os.environ[
 SNI=os.environ["REALITY_SNI"]; PER=int(os.environ["ATLAS_PROBES_PER_ASN"]); TIMEOUT=int(os.environ["ATLAS_TIMEOUT"])
 providers={12389:"Rostelecom",8359:"MTS",8402:"Beeline",25513:"MGTS",3216:"Beeline/SPb",20485:"TTK",25490:"RTK-South",43727:"MegaFon",12714:"MegaFon",12768:"Dom.ru"}
 def req(url, method="GET", data=None):
-    h={"Accept":"application/json","User-Agent":"censorcheck-full/0.4"}
+    h={"Accept":"application/json","User-Agent":"censorcheck-full/0.5.1"}
     if data is not None:
         h["Content-Type"]="application/json"; h["Authorization"]=f"Key {KEY}"; data=json.dumps(data).encode()
     r=urllib.request.Request(url,data=data,headers=h,method=method)
